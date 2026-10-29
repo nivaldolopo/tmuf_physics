@@ -3642,6 +3642,58 @@ static const tmuf_gbx_chunk SOUND_COMPONENT_CHUNKS[] = {READ(0x0908f000, c0908f0
 static const tmuf_gbx_class SOUND_COMPONENT = {0x0908f000, "CPlugSoundEngineComponent", sizeof(tmuf_sound_component_def),
                                               SOUND_COMPONENT_CHUNKS, 1, NULL};
 
+/* ---- CPlugFontBitmap (0x0904e000) ---- */
+
+/* colours (n x 16 bytes), then the char -> letter table (n x u16) */
+static void c0904e004(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  UNUSED(id);
+  skip_counted(g, 16);
+  skip_counted(g, 2);
+}
+
+/* kerning: n, a u32, n x 8 bytes */
+static void c0904e005(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  UNUSED(id);
+  uint32_t n = tmuf_gbx_u32(g);
+  tmuf_gbx_u32(g);
+  if (n > (1u << 20)) {
+    tmuf_gbx_fail(g, "font kerning count %u", n);
+    return;
+  }
+  tmuf_gbx_skip(g, (size_t)n * 8);
+}
+
+/* line height and ascent (1/64 px), the letters (32 bytes each: char code,
+   uv rectangle, six s16 metrics), then the pages (node references) */
+static void c0904e007(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(id);
+  tmuf_plug_font_bitmap *f = node;
+  tmuf_gbx_u32(g);
+  tmuf_gbx_u32(g);
+  f->glyph_count = tmuf_gbx_u32(g);
+  if (f->glyph_count > 65536) {
+    tmuf_gbx_fail(g, "font letter count %u", f->glyph_count);
+    return;
+  }
+  tmuf_gbx_skip(g, (size_t)f->glyph_count * 32);
+  if (tmuf_gbx_u32(g)) {
+    f->page_count = tmuf_gbx_u32(g);
+    if (f->page_count > 256) {
+      tmuf_gbx_fail(g, "font page count %u", f->page_count);
+      return;
+    }
+    for (uint32_t i = 0; i < f->page_count && !g->error; i++)
+      tmuf_gbx_noderef(g);
+  }
+}
+
+static const tmuf_gbx_chunk FONT_BITMAP_CHUNKS[] = {READ(0x0904e004, c0904e004), READ(0x0904e005, c0904e005),
+                                                    READ(0x0904e006, skip16), READ(0x0904e007, c0904e007)};
+static const tmuf_gbx_class FONT_BITMAP = {0x0904e000, "CPlugFontBitmap", sizeof(tmuf_plug_font_bitmap),
+                                           FONT_BITMAP_CHUNKS, COUNT(FONT_BITMAP_CHUNKS), NULL};
+
 const tmuf_gbx_class *const tmuf_pack_classes[] = {
     &SOLID,           &TREE,  &TREE_MIP,        &TREE_LIGHT, &VISUAL,          &SURFACE, &SURFACE_GEOM,
     &PLUG_LIGHT,      &BITMAP_RENDER_HEMI, &BITMAP_RENDER_LFM,
@@ -3655,5 +3707,6 @@ const tmuf_gbx_class *const tmuf_pack_classes[] = {
     &MOOD,            &AMBIENT_OCC, &MOTION_WEATHERS, &FUNC_WEATHER, &FUNC_CLOUDS, &FUNC_LAYER_UV, &FUNC_SHADERS,
     &FUNC_TREE_SEQUENCE, &FUNC_ENVELOPE, &FUNC_GRADIENT, &PARTICLE_MODEL, &PARTICLE_TYPE, &POINTS_IN_SPHERE,
     &PLUG_SOUND,      &PLUG_SOUND_ENGINE, &PLUG_SOUND_SURFACE, &PLUG_SOUND_MULTI, &SOUND_COMPONENT,
+    &FONT_BITMAP,
 };
 const size_t tmuf_pack_class_count = COUNT(tmuf_pack_classes);

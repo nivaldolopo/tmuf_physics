@@ -768,6 +768,14 @@ typedef struct tmuf_func_shaders {
   tmuf_node_list funcs;
 } tmuf_func_shaders;
 
+/* CPlugFontBitmap (0x0904e000): a bitmap font. Read so that its file
+   parses with the game's feedback (tmuf_packs_read_parsed); the letters
+   themselves are left to the caller. */
+typedef struct tmuf_plug_font_bitmap {
+  uint32_t glyph_count;
+  uint32_t page_count;
+} tmuf_plug_font_bitmap;
+
 extern const tmuf_gbx_class *const tmuf_pack_classes[];
 extern const size_t tmuf_pack_class_count;
 

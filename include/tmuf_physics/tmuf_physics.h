@@ -82,6 +82,13 @@ TMUF_API void tmuf_packs_close(tmuf_packs *packs);
    such as tmuf_visual_texture.pack_file. Returns its bytes (free them with
    tmuf_free) and their count in *size, or NULL. Thread-safe. */
 TMUF_API void *tmuf_packs_read(const tmuf_packs *packs, const char *path, size_t *size);
+/* The same file read through the GBX parser, as the game reads it: for
+   files whose decryption takes the parser's feedback (fonts such as
+   Menu\Media\Font\United.Font.Gbx), which tmuf_packs_read cannot give.
+   Returns the plain bytes the parser read, from "GBX" to the body's end
+   marker (free them with tmuf_free), and their count in *size; NULL if the
+   file is missing or its root class has no reader. Thread-safe. */
+TMUF_API void *tmuf_packs_read_parsed(const tmuf_packs *packs, const char *path, size_t *size);
 
 /* ---- tracks: everything about a map that does not change while driving ---- */
 

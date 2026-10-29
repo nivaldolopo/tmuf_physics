@@ -8,6 +8,7 @@
 
 #include "common/compress.h"
 #include "common/controls.h"
+#include "common/pack_classes.h"
 
 void tmuf_set_error(char *err, size_t err_size, const char *fmt, ...) {
   if (!err || !err_size)
@@ -57,6 +58,76 @@ void *tmuf_packs_read(const tmuf_packs *packs, const char *path, size_t *size) {
   if (size)
     *size = n;
   return data;
+}
+
+/* A source that keeps a copy of every byte read through it, and passes the
+   parser's feedback on. */
+typedef struct record_source {
+  tmuf_source base;
+  tmuf_source *inner;
+  uint8_t *data;
+  size_t size, cap;
+  int failed;
+} record_source;
+
+static int record_read(tmuf_source *src, void *out, size_t n) {
+  record_source *r = (record_source *)src;
+  if (!r->inner->read(r->inner, out, n))
+    return 0;
+  if (r->size + n > r->cap) {
+    size_t cap = r->cap ? r->cap : 4096;
+    while (cap < r->size + n)
+      cap *= 2;
+    uint8_t *data = realloc(r->data, cap);
+    if (!data) {
+      r->failed = 1;
+      return 0;
+    }
+    r->data = data;
+    r->cap = cap;
+  }
+  memcpy(r->data + r->size, out, n);
+  r->size += n;
+  return 1;
+}
+
+static void record_mix(tmuf_source *src, const uint8_t *bytes, size_t n) {
+  record_source *r = (record_source *)src;
+  if (r->inner->mix)
+    r->inner->mix(r->inner, bytes, n);
+}
+
+void *tmuf_packs_read_parsed(const tmuf_packs *packs, const char *path, size_t *size) {
+  if (size)
+    *size = 0;
+  if (!packs || !path)
+    return NULL;
+  const tmuf_pack_ref ref = tmuf_packset_find(&packs->set, path);
+  if (ref.pack < 0)
+    return NULL;
+  tmuf_pack_stream ps;
+  if (!tmuf_pack_stream_open(&ps, &packs->set.packs[ref.pack], ref.file))
+    return NULL;
+  record_source rec;
+  memset(&rec, 0, sizeof rec);
+  rec.base.read = record_read;
+  rec.base.mix = record_mix;
+  rec.inner = &ps.base;
+  tmuf_arena arena;
+  tmuf_arena_init(&arena);
+  tmuf_gbx g;
+  tmuf_gbx_init(&g, &rec.base, &arena, tmuf_pack_classes, tmuf_pack_class_count);
+  g.feedback = 1;
+  int ok = tmuf_gbx_read_header(&g) && tmuf_gbx_read_root(&g) && !g.error && !rec.failed;
+  tmuf_arena_free(&arena);
+  tmuf_pack_stream_close(&ps);
+  if (!ok) {
+    free(rec.data);
+    return NULL;
+  }
+  if (size)
+    *size = rec.size;
+  return rec.data ? rec.data : calloc(1, 1);
 }
 
 /* ---- replays ---- */
