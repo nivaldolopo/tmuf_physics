@@ -90,6 +90,45 @@ TMUF_API void *tmuf_packs_read(const tmuf_packs *packs, const char *path, size_t
    file is missing or its root class has no reader. Thread-safe. */
 TMUF_API void *tmuf_packs_read_parsed(const tmuf_packs *packs, const char *path, size_t *size);
 
+/* ---- interface frames: the game's HUD and menu layouts ---- */
+
+/* One control of an interface frame file (CControlFrame, 0x07016000, e.g.
+   Interface\Mobil\Control\Frame\FrameRaceCommon.Frame.Gbx), as archived.
+   Strings are "" when absent; they live as long as the frame. */
+typedef struct tmuf_frame_control {
+  int parent;            /* index of its frame in the list, -1 for the root */
+  uint32_t class_id;     /* e.g. 0x07006000 CControlLabel, 0x0701b000 CControlQuad */
+  const char *class_name;
+  const char *name;      /* its id (CSceneObject 0x0a005001) */
+  const char *file;      /* a frame instanced from another file: that file's
+                            name (its controls are not in this list) */
+  float iso[12];         /* where its frame puts it: rotation rows, then the
+                            translation (x, y, z) */
+  float box[6];          /* its box: centre x, y, z, then half size x, y, z */
+  uint32_t align[2];     /* horizontal, vertical (CControlBase 0x0700100e) */
+  uint32_t flags;        /* CControlBase's flags word */
+  const char *text;      /* the text it shows (a label's, a button's, or the
+                            control's own), often a translation key */
+  const char *style;     /* its style: an external style file's name, or
+                            the style sheet name */
+  const char *font;      /* its font file's name, from its own style or
+                            its inline style */
+  float text_size[2];    /* the style's two reals after the font */
+  int has_color;
+  float color[4];        /* the style's text colour, r g b a */
+  const char *image;     /* an image reference's file name */
+} tmuf_frame_control;
+
+typedef struct tmuf_frame tmuf_frame;
+
+/* Reads a frame file from the packs through the GBX parser (frames are
+   encrypted with the parser's feedback, like fonts). Returns NULL with a
+   message in err when it is missing or doesn't parse to its end. */
+TMUF_API tmuf_frame *tmuf_frame_load(const tmuf_packs *packs, const char *path, char *err, size_t err_size);
+TMUF_API size_t tmuf_frame_control_count(const tmuf_frame *frame);
+TMUF_API const tmuf_frame_control *tmuf_frame_controls(const tmuf_frame *frame);
+TMUF_API void tmuf_frame_free(tmuf_frame *frame);
+
 /* ---- tracks: everything about a map that does not change while driving ---- */
 
 typedef struct tmuf_track tmuf_track;

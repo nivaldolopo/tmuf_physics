@@ -130,6 +130,147 @@ void *tmuf_packs_read_parsed(const tmuf_packs *packs, const char *path, size_t *
   return rec.data ? rec.data : calloc(1, 1);
 }
 
+/* ---- interface frames ---- */
+
+struct tmuf_frame {
+  tmuf_arena arena; /* the parsed nodes; the strings point into it */
+  tmuf_frame_control *controls;
+  size_t count, cap;
+};
+
+static int derives_from_frame(uint32_t class_id) {
+  for (int depth = 0; depth < 32 && class_id && class_id != 0xffffffffu; depth++) {
+    if (class_id == 0x07016000u)
+      return 1;
+    class_id = tmuf_class_parent(class_id);
+  }
+  return 0;
+}
+
+static const char *node_file(const tmuf_gbx_node *n) {
+  return n && n->external && n->file ? n->file : "";
+}
+
+static void frame_add(tmuf_frame *f, const tmuf_gbx_node *n, int parent, const float *iso, const char *instance_name,
+                      int depth) {
+  if (!n || depth > 32)
+    return;
+  if (f->count == f->cap) {
+    size_t cap = f->cap ? f->cap * 2 : 64;
+    tmuf_frame_control *c = realloc(f->controls, cap * sizeof *c);
+    if (!c)
+      return;
+    f->controls = c;
+    f->cap = cap;
+  }
+  int index = (int)f->count++;
+  tmuf_frame_control *out = &f->controls[index];
+  memset(out, 0, sizeof *out);
+  out->parent = parent;
+  out->class_id = n->class_id;
+  out->class_name = n->cls ? n->cls->name : "";
+  out->name = instance_name ? instance_name : "";
+  out->file = out->text = out->style = out->font = out->image = "";
+  if (iso)
+    memcpy(out->iso, iso, sizeof out->iso);
+  else
+    out->iso[0] = out->iso[4] = out->iso[8] = 1.0f;
+  if (n->external) {
+    /* an instanced frame file (the parser only reads it as a reference) */
+    out->class_id = 0x07016000u;
+    out->class_name = "CControlFrame";
+    out->file = node_file(n);
+    return;
+  }
+  const tmuf_control *c = n->data;
+  if (!c)
+    return;
+  if (c->name && c->name[0])
+    out->name = c->name;
+  memcpy(out->box, c->box, sizeof out->box);
+  memcpy(out->align, c->align, sizeof out->align);
+  out->flags = c->flags;
+  out->text = c->text ? c->text : "";
+  out->image = node_file(c->image);
+  const tmuf_control_style *st = NULL;
+  if (c->style && c->style->external)
+    out->style = node_file(c->style);
+  else if (c->style && c->style->data && c->style->class_id == 0x07017000u)
+    st = c->style->data;
+  if (!out->style[0] && c->style_name && c->style_name[0])
+    out->style = c->style_name;
+  if (!out->style[0] && c->style_sheet)
+    out->style = node_file(c->style_sheet);
+  if (c->has_own_style)
+    st = &c->own_style;
+  if (st) {
+    out->font = node_file(st->font);
+    memcpy(out->text_size, st->text_size, sizeof out->text_size);
+    out->has_color = st->has_color;
+    memcpy(out->color, st->color, sizeof out->color);
+    if (!out->style[0] && st->name)
+      out->style = st->name;
+  }
+  for (uint32_t i = 0; i < c->child_count; i++)
+    frame_add(f, c->children[i].control, index, c->children[i].iso, c->children[i].name, depth + 1);
+}
+
+tmuf_frame *tmuf_frame_load(const tmuf_packs *packs, const char *path, char *err, size_t err_size) {
+  if (!packs || !path) {
+    tmuf_set_error(err, err_size, "no packs or path");
+    return NULL;
+  }
+  const tmuf_pack_ref ref = tmuf_packset_find(&packs->set, path);
+  if (ref.pack < 0) {
+    tmuf_set_error(err, err_size, "%s: not in the packs", path);
+    return NULL;
+  }
+  const tmuf_pack *pack = &packs->set.packs[ref.pack];
+  tmuf_pack_stream ps;
+  if (!tmuf_pack_stream_open(&ps, pack, ref.file)) {
+    tmuf_set_error(err, err_size, "%s: cannot open", path);
+    return NULL;
+  }
+  tmuf_frame *f = calloc(1, sizeof *f);
+  if (!f) {
+    tmuf_pack_stream_close(&ps);
+    tmuf_set_error(err, err_size, "out of memory");
+    return NULL;
+  }
+  tmuf_arena_init(&f->arena);
+  tmuf_gbx g;
+  tmuf_gbx_init(&g, &ps.base, &f->arena, tmuf_pack_classes, tmuf_pack_class_count);
+  g.feedback = 1;
+  const tmuf_control *root = tmuf_gbx_read_header(&g) ? tmuf_gbx_read_root(&g) : NULL;
+  const uint64_t size = pack->files[ref.file].uncompressed_size;
+  tmuf_pack_stream_close(&ps);
+  if (!root || g.error || g.pos != size) {
+    tmuf_set_error(err, err_size, "%s: %s after %llu of %llu bytes", path, g.error ? g.message : "parse ended",
+                   (unsigned long long)g.pos, (unsigned long long)size);
+    tmuf_frame_free(f);
+    return NULL;
+  }
+  if (!derives_from_frame(g.class_id)) {
+    tmuf_set_error(err, err_size, "%s: not a frame (%08x)", path, g.class_id);
+    tmuf_frame_free(f);
+    return NULL;
+  }
+  frame_add(f, &g.nodes[0], -1, NULL, NULL, 0);
+  return f;
+}
+
+size_t tmuf_frame_control_count(const tmuf_frame *f) { return f ? f->count : 0; }
+
+const tmuf_frame_control *tmuf_frame_controls(const tmuf_frame *f) { return f ? f->controls : NULL; }
+
+void tmuf_frame_free(tmuf_frame *f) {
+  if (!f)
+    return;
+  tmuf_arena_free(&f->arena);
+  free(f->controls);
+  free(f);
+}
+
 /* ---- replays ---- */
 
 tmuf_replay *tmuf_replay_load(const void *data, size_t size, char *err, size_t err_size) {

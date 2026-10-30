@@ -776,6 +776,68 @@ typedef struct tmuf_plug_font_bitmap {
   uint32_t page_count;
 } tmuf_plug_font_bitmap;
 
+/* CControlIconIndex (0x0702b000): a cell of an icon sheet, as archived
+   (the numbers' meaning is not traced yet) */
+typedef struct tmuf_icon_index {
+  const char *name;
+  uint32_t numbers[6]; /* in archive order: +0x18, +0x20, +0x28, +0x1c, +0x24, +0x2c */
+  uint32_t index;      /* +0x30 (chunk 001+) */
+  uint32_t extra;      /* +0x34 (chunk 002) */
+  float reals[2];      /* +0x38, +0x3c (chunk 002) */
+} tmuf_icon_index;
+
+/* CFuncEnum (0x0500e000): one value per state (materials, icons) */
+typedef struct tmuf_func_enum {
+  tmuf_node_list values;
+  const char *name;
+} tmuf_func_enum;
+
+/* CControlStyle (0x07017000): the text style a control draws with (an
+   interface file's own, or the one a label or button forks); 0 / NULL
+   where its chunks don't give it */
+typedef struct tmuf_control_style {
+  tmuf_gbx_node *font; /* a CPlugFont (Led.Font.Gbx, United.Font.Gbx...) */
+  float text_size[2];  /* the two reals after the font */
+  int has_color;
+  float color[4];      /* the text colour, r g b a */
+  const char *name;    /* 0x0701700c / 01e: its id */
+} tmuf_control_style;
+
+/* A child of a CControlFrame: the control, and where the frame puts it
+   (CControlFrame::ArchiveChild: GmMat3 rows, then the translation) */
+typedef struct tmuf_control_child {
+  tmuf_gbx_node *control;
+  const char *name; /* an instanced model's own id (its own data) */
+  float iso[12];
+} tmuf_control_child;
+
+/* The interface controls (CControlBase 0x07001000 and the classes below
+   it: frames, labels, quads, buttons...): what lays them out and what they
+   show. Every field is as archived; 0 / NULL when its chunk is absent. */
+typedef struct tmuf_control {
+  const char *name;         /* CSceneObject 0x0a005001 (its id) */
+  uint32_t flags;           /* CControlBase 0x07001009/00c: the flags word */
+  tmuf_gbx_node *style;     /* 009/00c: its CControlStyle */
+  tmuf_gbx_node *style_sheet;
+  const char *style_name;   /* 0x07001010: its style's name in the style sheet */
+  const char *stack_text;   /* 009/00c, flags & 0x20 */
+  int has_box;
+  float box[6];             /* 00a/00b/00d/00e: GmBoxAligned (centre xyz, half size xyz) */
+  float size[2];            /* 00a/00b */
+  uint32_t align[2];        /* 00e: horizontal, vertical */
+  const char *text;         /* 00f, CControlLabel/CControlButton: text */
+  int has_own_style;        /* CControlLabel 0x07006000, CControlButton 0x07007000: */
+  tmuf_control_style own_style; /* the style it forks (font, text size, colour) */
+  uint32_t text_flags;      /* CControlText 0x07031000 / Label 003-006 */
+  float text_scale;
+  uint32_t text_extra;
+  float quad_size[2];       /* CControlQuad 0x0701b0xx */
+  const char *quad_id;      /* CControlQuad 0x0701b006 */
+  tmuf_gbx_node *image;     /* CControlUiElement 0x07004000 / Button icon */
+  uint32_t child_count;     /* CControlContainer: its children */
+  tmuf_control_child *children;
+} tmuf_control;
+
 extern const tmuf_gbx_class *const tmuf_pack_classes[];
 extern const size_t tmuf_pack_class_count;
 

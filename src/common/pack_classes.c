@@ -3694,6 +3694,717 @@ static const tmuf_gbx_chunk FONT_BITMAP_CHUNKS[] = {READ(0x0904e004, c0904e004),
 static const tmuf_gbx_class FONT_BITMAP = {0x0904e000, "CPlugFontBitmap", sizeof(tmuf_plug_font_bitmap),
                                            FONT_BITMAP_CHUNKS, COUNT(FONT_BITMAP_CHUNKS), NULL};
 
+/* ---- the interface controls: CControlBase (0x07001000) and below ----
+
+   A control is a CSceneMobil (CSceneObject 0x0a005xxx, CSceneMobil
+   0x0a011xxx chunks), then CControlBase::Chunk, then its own class. */
+
+static void read_layout(tmuf_gbx *g, const char *l, tmuf_control_style *st);
+
+static void control_name(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(id);
+  ((tmuf_control *)node)->name = id_text(g);
+}
+
+static void control_node_list(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  UNUSED(id);
+  tmuf_node_list l;
+  read_node_list(g, &l);
+}
+
+/* CControlBase overrides CSceneMobil's 0x0a011005: a bool, then the
+   mobil's tree item when set */
+static void control_c0a011005(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  UNUSED(id);
+  if (tmuf_gbx_bool(g))
+    tmuf_gbx_fail(g, "control with a tree item (0x0a011005)");
+}
+
+/* CControlBase::CStyleSheetElem::Archive (the exe's 0x762820): a name in
+   the style sheet, or, without one, the node itself */
+static tmuf_gbx_node *style_sheet_elem(tmuf_gbx *g, const char **name) {
+  const char *s = id_text(g);
+  if (name)
+    *name = s;
+  return s[0] ? NULL : tmuf_gbx_noderef(g);
+}
+
+/* CMwStack::ArchiveStack: n, n kinds, then per kind 2 a bool and a name,
+   per kind 0 or 1 a number */
+static void mw_stack(tmuf_gbx *g) {
+  uint32_t n = tmuf_gbx_u32(g);
+  if (n > 256) {
+    tmuf_gbx_fail(g, "stack size %u", n);
+    return;
+  }
+  uint32_t kinds[256];
+  for (uint32_t i = 0; i < n; i++)
+    kinds[i] = tmuf_gbx_u32(g);
+  for (uint32_t i = 0; i < n && !g->error; i++) {
+    if (kinds[i] == 2) {
+      tmuf_gbx_bool(g);
+      tmuf_gbx_string(g);
+    } else if (kinds[i] < 2) {
+      tmuf_gbx_u32(g);
+    }
+  }
+}
+
+/* 0x07001009: the flags as an older layout (bit 0x80 here is the stack's,
+   0x20 once stored), the style sheet element, the style, the stack, then
+   three references */
+static void c07001009(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(id);
+  tmuf_control *c = node;
+  c->flags = tmuf_gbx_u32(g);
+  c->style_sheet = tmuf_gbx_noderef(g);
+  c->style = tmuf_gbx_noderef(g);
+  if (c->flags & 0x80) {
+    mw_stack(g);
+    c->stack_text = tmuf_gbx_string(g);
+  }
+  for (int i = 0; i < 3; i++)
+    tmuf_gbx_noderef(g);
+}
+
+static int derives_from(uint32_t class_id, uint32_t base) {
+  for (int depth = 0; depth < 32 && class_id && class_id != 0xffffffffu; depth++) {
+    if (class_id == base)
+      return 1;
+    class_id = tmuf_class_parent(class_id);
+  }
+  return 0;
+}
+
+/* The flags word a control's constructor leaves: CControlBase 0x268,
+   CControlContainer, CControlLabel and CControlQuad clear 0x20 and 0x08
+   (the container also 0x200, the quad 0x800) and set 0x02, CControlEntry
+   sets 0x100 */
+static uint32_t control_default_flags(uint32_t class_id) {
+  uint32_t f = 0x268;
+  if (derives_from(class_id, 0x07002000u))
+    f = (f & 0xfffffdd7u) | 2;
+  if (derives_from(class_id, 0x07006000u))
+    f = (f & 0xffffffd7u) | 2;
+  if (derives_from(class_id, 0x0701b000u))
+    f = (f & 0xfffff7d7u) | 2;
+  if (derives_from(class_id, 0x07009000u))
+    f |= 0x100;
+  return f;
+}
+
+/* 0x0700100c: the flags (bits 0x120 are kept from the object: the
+   constructor's), the style sheet element, the style, and with flags &
+   0x20 a reference and a string */
+static void c0700100c(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(id);
+  tmuf_control *c = node;
+  uint32_t raw = tmuf_gbx_u32(g);
+  uint32_t old = control_default_flags(g->node_class);
+  c->flags = raw ^ ((old ^ raw) & 0x120u);
+  c->style_sheet = tmuf_gbx_noderef(g);
+  c->style = tmuf_gbx_noderef(g);
+  if (c->flags & 0x20) {
+    tmuf_gbx_noderef(g);
+    c->stack_text = tmuf_gbx_string(g);
+  }
+}
+
+/* 0x0700100a/00b: the size (SetCenter0HalfDiag: centre 0, half this
+   size); 00b then a reference */
+static void c0700100a(tmuf_gbx *g, void *node, uint32_t id) {
+  tmuf_control *c = node;
+  c->size[0] = tmuf_gbx_f32(g);
+  c->size[1] = tmuf_gbx_f32(g);
+  c->has_box = 1;
+  memset(c->box, 0, sizeof c->box);
+  c->box[3] = c->size[0] * 0.5f;
+  c->box[4] = c->size[1] * 0.5f;
+  if (id == 0x0700100bu)
+    tmuf_gbx_noderef(g);
+}
+
+/* 0x0700100d/00e: the box (GmBoxAligned::ArchiveABox: its centre x, y,
+   z, then its half size, as SetCenter0HalfDiag sets them), a reference;
+   00e then the alignment, horizontal and vertical */
+static void c0700100d(tmuf_gbx *g, void *node, uint32_t id) {
+  tmuf_control *c = node;
+  read_floats(g, c->box, 6);
+  c->has_box = 1;
+  c->size[0] = c->box[3] * 2.0f;
+  c->size[1] = c->box[4] * 2.0f;
+  tmuf_gbx_noderef(g);
+  if (id == 0x0700100eu) {
+    c->align[0] = tmuf_gbx_u32(g);
+    c->align[1] = tmuf_gbx_u32(g);
+  }
+}
+
+static void c0700100f(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(id);
+  ((tmuf_control *)node)->text = tmuf_gbx_string(g);
+}
+
+static void c07001010(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(id);
+  tmuf_control *c = node;
+  c->style_sheet = style_sheet_elem(g, &c->style_name);
+}
+
+#define CONTROL_BASE_CHUNKS \
+  NOPAY(0x01001000), NOPAY(0x0a005000), READ(0x0a005001, control_name), READ(0x0a005002, skip4), \
+      READ(0x0a005003, skip_noderef), READ(0x0a005004, skip4), NOPAY(0x0a011000), NOPAY(0x0a011001), \
+      NOPAY(0x0a011002), READ(0x0a011003, control_node_list), READ(0x0a011004, skip_noderef), \
+      READ(0x0a011005, control_c0a011005), READ(0x0a011006, skip_noderef), NOPAY(0x07001000), \
+      NOPAY(0x07001001), NOPAY(0x07001002), NOPAY(0x07001003), NOPAY(0x07001004), NOPAY(0x07001005), \
+      NOPAY(0x07001006), NOPAY(0x07001007), NOPAY(0x07001008), READ(0x07001009, c07001009), \
+      READ(0x0700100a, c0700100a), READ(0x0700100b, c0700100a), READ(0x0700100c, c0700100c), \
+      READ(0x0700100d, c0700100d), READ(0x0700100e, c0700100d), READ(0x0700100f, c0700100f), \
+      READ(0x07001010, c07001010)
+
+static const tmuf_gbx_chunk CONTROL_BASE_CHUNK_LIST[] = {CONTROL_BASE_CHUNKS};
+static const tmuf_gbx_class CONTROL_BASE = {0x07001000, "CControlBase", sizeof(tmuf_control),
+                                            CONTROL_BASE_CHUNK_LIST, COUNT(CONTROL_BASE_CHUNK_LIST), NULL};
+
+static int ends_with_frame(const char *s) {
+  static const char suffix[] = ".frame.gbx";
+  size_t len = s ? strlen(s) : 0, n = sizeof suffix - 1;
+  if (len < n)
+    return 0;
+  for (size_t i = 0; i < n; i++) {
+    char c = s[len - n + i];
+    if ((c >= 'A' && c <= 'Z' ? (char)(c + 32) : c) != suffix[i])
+      return 0;
+  }
+  return 1;
+}
+
+static int is_container(const tmuf_gbx_node *n) {
+  if (n->external) {
+    /* the game asks the loaded model; a file of ours is a container when
+       it is a frame (the only kind the interface files instance) */
+    return ends_with_frame(n->file);
+  }
+  return derives_from(n->class_id, 0x07002000u);
+}
+
+/* CControlContainer::InternalArchiveTerminalInstanceData (reading): until
+   an empty id, a child's id, a byte, the size, then that child's own
+   archive of that size (left unread) */
+static void control_terminal_data(tmuf_gbx *g) {
+  for (int guard = 0; guard < 4096 && !g->error; guard++) {
+    if (!id_text(g)[0])
+      return;
+    tmuf_gbx_u8(g);
+    tmuf_gbx_skip(g, tmuf_gbx_u32(g));
+  }
+}
+
+/* InternalDoMobilPtr (0x7b2350): the model, then the instance's own data,
+   ArchiveOwnDataOld of the model's class: CSceneMobil's (a version, its
+   id, its objects), then for a container CControlContainer's (a version,
+   its anchors' children, from version 3 the children's instance data) */
+static tmuf_gbx_node *control_instance(tmuf_gbx *g, const char **name) {
+  tmuf_gbx_node *model = tmuf_gbx_noderef(g);
+  if (!model || g->error)
+    return model;
+  tmuf_node_list objects;
+  memset(&objects, 0, sizeof objects);
+  mobil_own_data_into(g, name, &objects);
+  if (!is_container(model))
+    return model;
+  uint32_t version = tmuf_gbx_u32(g);
+  uint32_t anchors = tmuf_gbx_u32(g);
+  if (anchors) {
+    tmuf_gbx_fail(g, "control instance with %u anchors", anchors);
+    return model;
+  }
+  if (version > 2)
+    control_terminal_data(g);
+  return model;
+}
+
+/* CSceneMobil::DoMobilPtr, versioned: -1 none, -2 a plain reference, else
+   an internal reference slot, given on its first use */
+static tmuf_gbx_node *control_mobil_ptr(tmuf_gbx *g, const char **name) {
+  uint32_t v = tmuf_gbx_u32(g);
+  if (g->error || v == 0xffffffffu)
+    return NULL;
+  if (v == 0xfffffffeu)
+    return tmuf_gbx_noderef(g);
+  void **slot = tmuf_gbx_internal_ref(g, v);
+  if (!slot)
+    return NULL;
+  if (!*slot) {
+    tmuf_gbx_node *m = control_instance(g, name);
+    *slot = m ? (void *)m : (void *)g; /* g: taken, no model */
+    return m;
+  }
+  return *slot == (void *)g ? NULL : *slot;
+}
+
+/* CControlContainer::ArchiveChilds: a version, the count, then per child
+   (CControlFrame::ArchiveChild: a version first, and after the child its
+   placement) CControlContainer::ArchiveChild: 1 a plain reference, 2
+   InternalDoMobilPtr, 3 CSceneMobil::DoMobilPtr */
+static void control_children(tmuf_gbx *g, tmuf_control *c) {
+  tmuf_gbx_u32(g);
+  uint32_t n = tmuf_gbx_u32(g);
+  if (n > 4096) {
+    tmuf_gbx_fail(g, "control child count %u", n);
+    return;
+  }
+  const int frame = derives_from(g->node_class, 0x07016000u);
+  c->children = TMUF_ARENA_ARRAY(g->arena, tmuf_control_child, n ? n : 1);
+  c->child_count = n;
+  for (uint32_t i = 0; i < n && !g->error; i++) {
+    tmuf_control_child *ch = &c->children[i];
+    if (frame)
+      tmuf_gbx_u32(g);
+    uint32_t kind = tmuf_gbx_u32(g);
+    if (kind == 1) {
+      ch->control = tmuf_gbx_noderef(g);
+    } else if (kind == 2) {
+      ch->control = control_instance(g, &ch->name);
+    } else if (kind == 3) {
+      ch->control = control_mobil_ptr(g, &ch->name);
+    } else {
+      tmuf_gbx_fail(g, "control child kind %u", kind);
+      return;
+    }
+    if (frame)
+      read_floats(g, ch->iso, 12);
+  }
+}
+
+/* 0x07002005: two bools, a reference (its create script), then the
+   children unless the first bool is set */
+static void c07002005(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(id);
+  int no_children = tmuf_gbx_bool(g);
+  tmuf_gbx_bool(g);
+  tmuf_gbx_noderef(g);
+  if (!no_children)
+    control_children(g, node);
+}
+
+/* 0x07002006: a version, then with version 0 a bool */
+static void c07002006(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  UNUSED(id);
+  if (tmuf_gbx_u32(g) == 0)
+    tmuf_gbx_bool(g);
+}
+
+#define CONTROL_CONTAINER_CHUNKS \
+  NOPAY(0x07002000), NOPAY(0x07002001), NOPAY(0x07002002), NOPAY(0x07002003), NOPAY(0x07002004), \
+      READ(0x07002005, c07002005), READ(0x07002006, c07002006)
+
+static const tmuf_gbx_chunk CONTROL_CONTAINER_CHUNK_LIST[] = {CONTROL_CONTAINER_CHUNKS};
+static const tmuf_gbx_class CONTROL_CONTAINER = {0x07002000, "CControlContainer", sizeof(tmuf_control),
+                                                 CONTROL_CONTAINER_CHUNK_LIST, COUNT(CONTROL_CONTAINER_CHUNK_LIST),
+                                                 &CONTROL_BASE};
+
+/* CControlFrame 0x07016000: the children's placements again (n, then
+   GmMat3 + translation each) */
+static void c07016000(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(id);
+  tmuf_control *c = node;
+  uint32_t n = tmuf_gbx_u32(g);
+  if (n > 4096) {
+    tmuf_gbx_fail(g, "frame placement count %u", n);
+    return;
+  }
+  for (uint32_t i = 0; i < n && !g->error; i++) {
+    float iso[12];
+    read_floats(g, iso, 12);
+    if (i < c->child_count)
+      memcpy(c->children[i].iso, iso, sizeof iso);
+  }
+}
+
+static const tmuf_gbx_chunk CONTROL_FRAME_CHUNKS[] = {READ(0x07016000, c07016000)};
+static const tmuf_gbx_class CONTROL_FRAME = {0x07016000, "CControlFrame", sizeof(tmuf_control),
+                                             CONTROL_FRAME_CHUNKS, COUNT(CONTROL_FRAME_CHUNKS), &CONTROL_CONTAINER};
+
+/* CControlUiElement 0x07004000: a reference (its image) */
+static void c07004000(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(id);
+  ((tmuf_control *)node)->image = tmuf_gbx_noderef(g);
+}
+
+static const tmuf_gbx_chunk CONTROL_UI_ELEMENT_CHUNKS[] = {READ(0x07004000, c07004000)};
+static const tmuf_gbx_class CONTROL_UI_ELEMENT = {0x07004000, "CControlUiElement", sizeof(tmuf_control),
+                                                  CONTROL_UI_ELEMENT_CHUNKS, COUNT(CONTROL_UI_ELEMENT_CHUNKS),
+                                                  &CONTROL_CONTAINER};
+
+/* CControlText 0x07031000 (and CControlLabel 004-006's tail): flags, a
+   scale, a number */
+static void c07031000(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(id);
+  tmuf_control *c = node;
+  c->text_flags = tmuf_gbx_u32(g);
+  c->text_scale = tmuf_gbx_f32(g);
+  c->text_extra = tmuf_gbx_u32(g);
+}
+
+static const tmuf_gbx_chunk CONTROL_TEXT_CHUNKS[] = {READ(0x07031000, c07031000)};
+static const tmuf_gbx_class CONTROL_TEXT = {0x07031000, "CControlText", sizeof(tmuf_control), CONTROL_TEXT_CHUNKS,
+                                            COUNT(CONTROL_TEXT_CHUNKS), &CONTROL_BASE};
+
+/* CControlLabel::Chunk: 000 its own style (font reference, two reals, a
+   colour); 001-007 the text (a string; 002+ a bool; 005+ a reference
+   first), with text flags and scale (003-006) */
+static void label_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  tmuf_control *c = node;
+  switch (id) {
+  case 0x07006000u:
+    read_layout(g, "FSC", &c->own_style);
+    c->has_own_style = 1;
+    return;
+  case 0x07006001u:
+    c->text = tmuf_gbx_string(g);
+    return;
+  case 0x07006002u:
+    c->text = tmuf_gbx_string(g);
+    tmuf_gbx_bool(g);
+    return;
+  case 0x07006003u:
+    c->text_flags = tmuf_gbx_u32(g);
+    return;
+  case 0x07006004u:
+    c->text_flags = tmuf_gbx_u32(g);
+    c->text_scale = tmuf_gbx_f32(g);
+    return;
+  default: /* 005, 006, 007 */
+    c->text = tmuf_gbx_string(g);
+    tmuf_gbx_noderef(g);
+    tmuf_gbx_bool(g);
+    if (id == 0x07006007u)
+      return;
+    c->text_flags = tmuf_gbx_u32(g);
+    c->text_scale = tmuf_gbx_f32(g);
+    if (id == 0x07006006u)
+      c->text_extra = tmuf_gbx_u32(g);
+  }
+}
+
+static const tmuf_gbx_chunk CONTROL_LABEL_CHUNKS[] = {
+    READ(0x07006000, label_chunk), READ(0x07006001, label_chunk), READ(0x07006002, label_chunk),
+    READ(0x07006003, label_chunk), READ(0x07006004, label_chunk), READ(0x07006005, label_chunk),
+    READ(0x07006006, label_chunk), READ(0x07006007, label_chunk)};
+static const tmuf_gbx_class CONTROL_LABEL = {0x07006000, "CControlLabel", sizeof(tmuf_control),
+                                             CONTROL_LABEL_CHUNKS, COUNT(CONTROL_LABEL_CHUNKS), &CONTROL_TEXT};
+
+/* CControlButton::Chunk (0x07007xxx, 0x07008xxx) */
+static void button_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  tmuf_control *c = node;
+  switch (id) {
+  case 0x07007000u: /* style: font, two reals, colour, a reference; then the icon */
+    read_layout(g, "FSCr", &c->own_style);
+    c->has_own_style = 1;
+    c->image = tmuf_gbx_noderef(g);
+    return;
+  case 0x07007001u:
+  case 0x07007004u:
+  case 0x07007008u:
+    c->image = tmuf_gbx_noderef(g);
+    return;
+  case 0x07007002u:
+    c->text = tmuf_gbx_string(g);
+    return;
+  case 0x07007003u:
+  case 0x07008001u:
+    for (int i = 0; i < 4; i++)
+      tmuf_gbx_noderef(g);
+    return;
+  case 0x07007005u:
+    c->text = tmuf_gbx_string(g);
+    tmuf_gbx_u32(g);
+    c->image = tmuf_gbx_noderef(g);
+    return;
+  case 0x07007006u:
+    style_sheet_elem(g, NULL);
+    return;
+  case 0x07007007u:
+    style_sheet_elem(g, NULL);
+    tmuf_gbx_u32(g);
+    return;
+  case 0x07007009u:
+    tmuf_gbx_f32(g);
+    return;
+  case 0x0700700au:
+    tmuf_gbx_u32(g);
+    return;
+  case 0x0700700bu:
+    style_sheet_elem(g, NULL);
+    tmuf_gbx_u32(g);
+    tmuf_gbx_u32(g);
+    return;
+  case 0x0700700cu:
+    tmuf_gbx_id(g, NULL);
+    return;
+  case 0x07008000u:
+    tmuf_gbx_noderef(g);
+    tmuf_gbx_f32(g);
+    return;
+  }
+}
+
+static const tmuf_gbx_chunk CONTROL_BUTTON_CHUNKS[] = {
+    READ(0x07007000, button_chunk), READ(0x07007001, button_chunk), READ(0x07007002, button_chunk),
+    READ(0x07007003, button_chunk), READ(0x07007004, button_chunk), READ(0x07007005, button_chunk),
+    READ(0x07007006, button_chunk), READ(0x07007007, button_chunk), READ(0x07007008, button_chunk),
+    READ(0x07007009, button_chunk), READ(0x0700700a, button_chunk), READ(0x0700700b, button_chunk),
+    READ(0x0700700c, button_chunk), READ(0x07008000, button_chunk), READ(0x07008001, button_chunk)};
+static const tmuf_gbx_class CONTROL_BUTTON = {0x07007000, "CControlButton", sizeof(tmuf_control),
+                                              CONTROL_BUTTON_CHUNKS, COUNT(CONTROL_BUTTON_CHUNKS), &CONTROL_TEXT};
+
+/* CControlEntry::Chunk (0x07009xxx): its style (003: font, two reals, a
+   colour, a reference), then flags and numbers, no references */
+static void entry_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  static const char *const layouts[] = {
+      "", "", "", "rffccccrbbn", "bbn", "bbnn", "bbnnf", "n", "bbnnnfn", "bbb", "nn",
+  };
+  const char *l = layouts[id & 0xfu];
+  for (; *l && !g->error; l++) {
+    if (*l == 'r')
+      tmuf_gbx_noderef(g);
+    else
+      tmuf_gbx_u32(g); /* b, n, f, c: four bytes each */
+  }
+}
+
+static const tmuf_gbx_chunk CONTROL_ENTRY_CHUNKS[] = {
+    NOPAY(0x07009000), NOPAY(0x07009001), NOPAY(0x07009002), READ(0x07009003, entry_chunk),
+    READ(0x07009004, entry_chunk), READ(0x07009005, entry_chunk), READ(0x07009006, entry_chunk),
+    READ(0x07009007, entry_chunk), READ(0x07009008, entry_chunk), READ(0x07009009, entry_chunk),
+    READ(0x0700900a, entry_chunk)};
+static const tmuf_gbx_class CONTROL_ENTRY = {0x07009000, "CControlEntry", sizeof(tmuf_control),
+                                             CONTROL_ENTRY_CHUNKS, COUNT(CONTROL_ENTRY_CHUNKS), &CONTROL_TEXT};
+
+/* CControlQuad::Chunk: its size (two reals), then by version a number and
+   two bools, or an id (006) */
+static void quad_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  tmuf_control *c = node;
+  if (id == 0x0701b006u) {
+    c->quad_id = id_text(g);
+    return;
+  }
+  if (id != 0x0701b004u) {
+    c->quad_size[0] = tmuf_gbx_f32(g);
+    c->quad_size[1] = tmuf_gbx_f32(g);
+  }
+  if (id == 0x0701b001u) {
+    tmuf_gbx_bool(g);
+    tmuf_gbx_f32(g);
+    tmuf_gbx_f32(g);
+  } else if (id == 0x0701b002u || id == 0x0701b003u || id == 0x0701b004u) {
+    tmuf_gbx_u32(g);
+    if (id != 0x0701b002u) {
+      tmuf_gbx_bool(g);
+      tmuf_gbx_bool(g);
+    }
+  }
+}
+
+static const tmuf_gbx_chunk CONTROL_QUAD_CHUNKS[] = {
+    READ(0x0701b000, quad_chunk), READ(0x0701b001, quad_chunk), READ(0x0701b002, quad_chunk),
+    READ(0x0701b003, quad_chunk), READ(0x0701b004, quad_chunk), READ(0x0701b005, quad_chunk),
+    READ(0x0701b006, quad_chunk)};
+static const tmuf_gbx_class CONTROL_QUAD = {0x0701b000, "CControlQuad", sizeof(tmuf_control), CONTROL_QUAD_CHUNKS,
+                                            COUNT(CONTROL_QUAD_CHUNKS), &CONTROL_BASE};
+
+/* CControlEffectMaster (0x0701c000): its effects, nine (000) or ten
+   (002) references, 003 one more; 001 a bool and a number */
+static void effect_master_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  int n = id == 0x0701c000u ? 9 : id == 0x0701c002u ? 10 : id == 0x0701c003u ? 1 : 0;
+  if (id == 0x0701c001u) {
+    tmuf_gbx_bool(g);
+    tmuf_gbx_u32(g);
+  }
+  for (int i = 0; i < n && !g->error; i++)
+    tmuf_gbx_noderef(g);
+}
+
+static const tmuf_gbx_chunk CONTROL_EFFECT_MASTER_CHUNKS[] = {
+    NOPAY(0x01001000), READ(0x0701c000, effect_master_chunk), READ(0x0701c001, effect_master_chunk),
+    READ(0x0701c002, effect_master_chunk), READ(0x0701c003, effect_master_chunk)};
+static const tmuf_gbx_class CONTROL_EFFECT_MASTER = {0x0701c000, "CControlEffectMaster", 1,
+                                                     CONTROL_EFFECT_MASTER_CHUNKS,
+                                                     COUNT(CONTROL_EFFECT_MASTER_CHUNKS), NULL};
+
+/* ---- CFuncEnum (0x0500e000): a value per state (a button's icons, a
+   style's materials) ---- */
+
+/* CFuncEnum::Chunk (the exe's 0x586f10): 000 the values (a node list);
+   001 a number, the values; 002 an id; 003 a number; 004 a number, the
+   values, an id, two numbers, a counted u32 array; 005 that and two pairs
+   of reals; 006 a reference; 007 two reals */
+static void func_enum_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  tmuf_func_enum *e = node;
+  switch (id) {
+  case 0x0500e000u:
+    read_node_list(g, &e->values);
+    return;
+  case 0x0500e001u:
+    tmuf_gbx_u32(g);
+    read_node_list(g, &e->values);
+    return;
+  case 0x0500e002u:
+    e->name = id_text(g);
+    return;
+  case 0x0500e003u:
+    tmuf_gbx_u32(g);
+    return;
+  case 0x0500e006u:
+    tmuf_gbx_noderef(g);
+    return;
+  case 0x0500e007u:
+    tmuf_gbx_skip(g, 8);
+    return;
+  default: /* 004, 005 */
+    tmuf_gbx_u32(g);
+    read_node_list(g, &e->values);
+    e->name = id_text(g);
+    tmuf_gbx_u32(g);
+    tmuf_gbx_u32(g);
+    skip_counted(g, 4);
+    if (id == 0x0500e005u)
+      tmuf_gbx_skip(g, 16);
+  }
+}
+
+static const tmuf_gbx_chunk FUNC_ENUM_CHUNKS[] = {
+    NOPAY(0x01001000),              READ(0x0500e000, func_enum_chunk), READ(0x0500e001, func_enum_chunk),
+    READ(0x0500e002, func_enum_chunk), READ(0x0500e003, func_enum_chunk), READ(0x0500e004, func_enum_chunk),
+    READ(0x0500e005, func_enum_chunk), READ(0x0500e006, func_enum_chunk), READ(0x0500e007, func_enum_chunk)};
+static const tmuf_gbx_class FUNC_ENUM = {0x0500e000, "CFuncEnum", sizeof(tmuf_func_enum), FUNC_ENUM_CHUNKS,
+                                         COUNT(FUNC_ENUM_CHUNKS), NULL};
+
+/* ---- CControlIconIndex (0x0702b000): which cell of an icon sheet ----
+
+   CControlIconIndex::Chunk (the exe's 0x793740): 000 an id, then six
+   numbers (in the object's order +0x18, +0x20, +0x28, +0x1c, +0x24, +0x2c);
+   001 is 000 then a number (+0x30); 002 is 001 then a number (+0x34) and
+   two reals (+0x38, +0x3c) */
+static void icon_index_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  tmuf_icon_index *ix = node;
+  ix->name = id_text(g);
+  for (int i = 0; i < 6; i++)
+    ix->numbers[i] = tmuf_gbx_u32(g);
+  if (id >= 0x0702b001u)
+    ix->index = tmuf_gbx_u32(g);
+  if (id == 0x0702b002u) {
+    ix->extra = tmuf_gbx_u32(g);
+    ix->reals[0] = tmuf_gbx_f32(g);
+    ix->reals[1] = tmuf_gbx_f32(g);
+  }
+}
+
+static const tmuf_gbx_chunk ICON_INDEX_CHUNKS[] = {NOPAY(0x01001000), READ(0x0702b000, icon_index_chunk),
+                                                   READ(0x0702b001, icon_index_chunk),
+                                                   READ(0x0702b002, icon_index_chunk)};
+static const tmuf_gbx_class ICON_INDEX = {0x0702b000, "CControlIconIndex", sizeof(tmuf_icon_index),
+                                          ICON_INDEX_CHUNKS, COUNT(ICON_INDEX_CHUNKS), NULL};
+
+/* ---- CControlStyle (0x07017000): how a control draws ---- */
+
+/* Reads fields by a layout: r a reference, f a real, n a number, b a bool,
+   c a colour (four reals), v two reals, s a string, i an id, T
+   STextSettings_ColorAndChars::Archive (a version, a number, a colour, a
+   string), O its Archive_OldComplete (a number, a reference, two reals, a
+   number, a colour, a string). The first reference, two reals and colour
+   of a text style (marked by 'F', 'S', 'C') are kept. */
+static void read_layout(tmuf_gbx *g, const char *l, tmuf_control_style *st) {
+  int first_color = 1;
+  for (; *l && !g->error; l++) {
+    switch (*l) {
+    case 'r':
+      tmuf_gbx_noderef(g);
+      break;
+    case 'F': {
+      tmuf_gbx_node *n = tmuf_gbx_noderef(g);
+      if (st)
+        st->font = n;
+      break;
+    }
+    case 'S':
+      for (int i = 0; i < 2; i++) {
+        float v = tmuf_gbx_f32(g);
+        if (st)
+          st->text_size[i] = v;
+      }
+      break;
+    case 'C':
+    case 'c': {
+      float c[4];
+      read_floats(g, c, 4);
+      if (st && *l == 'C' && first_color) {
+        memcpy(st->color, c, sizeof c);
+        st->has_color = 1;
+        first_color = 0;
+      }
+      break;
+    }
+    case 'v':
+      tmuf_gbx_skip(g, 8);
+      break;
+    case 's':
+      tmuf_gbx_string(g);
+      break;
+    case 'i':
+      if (st)
+        st->name = id_text(g);
+      else
+        tmuf_gbx_id(g, NULL);
+      break;
+    case 'T': {
+      tmuf_gbx_u32(g);
+      tmuf_gbx_u32(g);
+      read_layout(g, first_color ? "C" : "c", st);
+      first_color = 0;
+      tmuf_gbx_string(g);
+      break;
+    }
+    case 'O':
+      read_layout(g, "nrffncs", NULL);
+      break;
+    default: /* f, n, b */
+      tmuf_gbx_u32(g);
+    }
+  }
+}
+
+/* CControlStyle::Chunk, per chunk 0x07017000-01e (the exe's 0x770700) */
+static const char *const STYLE_LAYOUTS[] = {
+    "rrrrr",        "FSCrffc",      "r",           "frrrrr",        "r",            "rrrnff",
+    "ffrrrrr",      "brrffff",      "FSCrffcrffc", "r",             "brrffffr",     "bnn",
+    "i",            "rrnff",        "rffr",        "brrrffffr",     "rrnffnr",      "ffrrrrc",
+    "bffcc",        "sss",          "bbffccc",     "bbffccvv",      "r",            "bbffccvvf",
+    "cc",           "nFSnCsOO",     "brrrrffffrf", "FSTTT",         "ffffrrr",      "brrrrffffrf",
+    "i",
+};
+
+static void style_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  read_layout(g, STYLE_LAYOUTS[id - 0x07017000u], node);
+}
+
+#define STYLE(n) READ(0x07017000 + (n), style_chunk)
+static const tmuf_gbx_chunk CONTROL_STYLE_CHUNKS[] = {
+    NOPAY(0x01001000), STYLE(0x00), STYLE(0x01), STYLE(0x02), STYLE(0x03), STYLE(0x04), STYLE(0x05),
+    STYLE(0x06),       STYLE(0x07), STYLE(0x08), STYLE(0x09), STYLE(0x0a), STYLE(0x0b), STYLE(0x0c),
+    STYLE(0x0d),       STYLE(0x0e), STYLE(0x0f), STYLE(0x10), STYLE(0x11), STYLE(0x12), STYLE(0x13),
+    STYLE(0x14),       STYLE(0x15), STYLE(0x16), STYLE(0x17), STYLE(0x18), STYLE(0x19), STYLE(0x1a),
+    STYLE(0x1b),       STYLE(0x1c), STYLE(0x1d), STYLE(0x1e)};
+#undef STYLE
+static const tmuf_gbx_class CONTROL_STYLE = {0x07017000, "CControlStyle", sizeof(tmuf_control_style),
+                                             CONTROL_STYLE_CHUNKS, COUNT(CONTROL_STYLE_CHUNKS), NULL};
+
 const tmuf_gbx_class *const tmuf_pack_classes[] = {
     &SOLID,           &TREE,  &TREE_MIP,        &TREE_LIGHT, &VISUAL,          &SURFACE, &SURFACE_GEOM,
     &PLUG_LIGHT,      &BITMAP_RENDER_HEMI, &BITMAP_RENDER_LFM,
@@ -3708,5 +4419,7 @@ const tmuf_gbx_class *const tmuf_pack_classes[] = {
     &FUNC_TREE_SEQUENCE, &FUNC_ENVELOPE, &FUNC_GRADIENT, &PARTICLE_MODEL, &PARTICLE_TYPE, &POINTS_IN_SPHERE,
     &PLUG_SOUND,      &PLUG_SOUND_ENGINE, &PLUG_SOUND_SURFACE, &PLUG_SOUND_MULTI, &SOUND_COMPONENT,
     &FONT_BITMAP,
+    &CONTROL_BASE, &CONTROL_CONTAINER, &CONTROL_FRAME, &CONTROL_UI_ELEMENT, &CONTROL_TEXT, &CONTROL_LABEL,
+    &CONTROL_BUTTON, &CONTROL_ENTRY, &CONTROL_QUAD, &CONTROL_EFFECT_MASTER, &CONTROL_STYLE, &FUNC_ENUM, &ICON_INDEX,
 };
 const size_t tmuf_pack_class_count = COUNT(tmuf_pack_classes);

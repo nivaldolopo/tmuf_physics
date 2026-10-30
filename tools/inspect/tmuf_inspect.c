@@ -308,7 +308,8 @@ static int cmd_gbx(const char *dir, const char *pack_name, const char *path) {
     tmuf_gbx_read_root(&g);
   printf("%s after %llu bytes\n", g.error ? g.message : "parsed", (unsigned long long)g.pos);
   if (g.error) {
-    size_t end = ls.seen_size, start = end > 96 ? end - 96 : 0;
+    size_t back = getenv("TMUF_DUMP") ? (size_t)atoi(getenv("TMUF_DUMP")) : 96;
+    size_t end = ls.seen_size, start = end > back ? end - back : 0;
     start &= ~(size_t)15;
     for (size_t i = start; i < end; i += 16) {
       printf("  %06zx:", i);
@@ -664,6 +665,53 @@ static void dump_tree(tmuf_assets *assets, tmuf_asset *owner, tmuf_gbx_node *nod
     dump_tree(assets, ta, t->children[i], depth + 1);
 }
 
+/* Prints an interface frame's controls (tmuf_frame_load), one per line,
+   indented under their frame. */
+static int cmd_frame(const char *packs_dir, const char *path) {
+  char err[512] = "";
+  tmuf_packs *packs = tmuf_packs_open(packs_dir, err, sizeof err);
+  if (!packs) {
+    fprintf(stderr, "%s\n", err);
+    return 1;
+  }
+  tmuf_frame *f = tmuf_frame_load(packs, path, err, sizeof err);
+  if (!f) {
+    fprintf(stderr, "%s\n", err);
+    tmuf_packs_close(packs);
+    return 1;
+  }
+  const tmuf_frame_control *c = tmuf_frame_controls(f);
+  size_t n = tmuf_frame_control_count(f);
+  for (size_t i = 0; i < n; i++) {
+    int depth = 0;
+    for (int p = c[i].parent; p >= 0 && depth < 32; p = c[p].parent)
+      depth++;
+    printf("%*s%s \"%s\"", depth * 2, "", c[i].class_name, c[i].name);
+    if (c[i].file[0])
+      printf(" file=%s", c[i].file);
+    printf(" at (%g %g %g)", c[i].iso[9], c[i].iso[10], c[i].iso[11]);
+    if (c[i].iso[0] != 1 || c[i].iso[4] != 1 || c[i].iso[1] != 0 || c[i].iso[3] != 0)
+      printf(" rot (%g %g / %g %g)", c[i].iso[0], c[i].iso[1], c[i].iso[3], c[i].iso[4]);
+    printf(" box c(%g %g) half(%g %g) align %u %u flags %x", c[i].box[0], c[i].box[1], c[i].box[3], c[i].box[4],
+           c[i].align[0], c[i].align[1], c[i].flags);
+    if (c[i].text[0])
+      printf(" text=\"%s\"", c[i].text);
+    if (c[i].style[0])
+      printf(" style=%s", c[i].style);
+    if (c[i].font[0])
+      printf(" font=%s size %g %g", c[i].font, c[i].text_size[0], c[i].text_size[1]);
+    if (c[i].has_color)
+      printf(" color %g %g %g %g", c[i].color[0], c[i].color[1], c[i].color[2], c[i].color[3]);
+    if (c[i].image[0])
+      printf(" image=%s", c[i].image);
+    printf("\n");
+  }
+  printf("%zu controls\n", n);
+  tmuf_frame_free(f);
+  tmuf_packs_close(packs);
+  return 0;
+}
+
 /* Extracts a pack file by its plain path (e.g. Vehicles\Media\Text\VHLSL\X.VHlsl.Txt). */
 static int cmd_catp(const char *packs, const char *path, const char *out) {
   tmuf_packset set;
@@ -758,6 +806,8 @@ static int cmd_solid(const char *packs, const char *path) {
 int main(int argc, char **argv) {
   if (argc >= 4 && strcmp(argv[1], "solid") == 0)
     return cmd_solid(argv[2], argv[3]);
+  if (argc >= 4 && strcmp(argv[1], "frame") == 0)
+    return cmd_frame(argv[2], argv[3]);
   if (argc >= 5 && strcmp(argv[1], "catp") == 0)
     return cmd_catp(argv[2], argv[3], argv[4]);
   if (argc >= 4 && strcmp(argv[1], "vehicle") == 0)
