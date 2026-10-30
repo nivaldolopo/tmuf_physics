@@ -1651,8 +1651,16 @@ TMUF_API int tmuf_world_load(tmuf_world *world, const void *buf);
 
 typedef struct tmuf_replay tmuf_replay;
 
-/* Copies what it needs; data may be freed afterwards. */
+/* Copies what it needs; data may be freed afterwards. The replay's first
+   ghost: every tmuf_replay_* below reads it. */
 TMUF_API tmuf_replay *tmuf_replay_load(const void *data, size_t size, char *err, size_t err_size);
+/* As tmuf_replay_load, with the replay's ghost number `ghost` (0 = the first)
+   in place of the first; NULL if the replay holds no such ghost. The Nations
+   campaign replays hold four: the Author, Gold, Silver and Bronze medals' ghosts. */
+TMUF_API tmuf_replay *tmuf_replay_load_ghost(const void *data, size_t size, uint32_t ghost, char *err,
+                                             size_t err_size);
+/* How many ghosts the replay's file holds. */
+TMUF_API uint32_t tmuf_replay_ghost_count(const tmuf_replay *replay);
 TMUF_API void tmuf_replay_free(tmuf_replay *replay);
 
 /* The embedded map (.Challenge.Gbx bytes, owned by the replay). */

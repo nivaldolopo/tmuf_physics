@@ -318,6 +318,10 @@ int tmuf_control_style_load(const tmuf_packs *packs, const char *path, tmuf_cont
 /* ---- replays ---- */
 
 tmuf_replay *tmuf_replay_load(const void *data, size_t size, char *err, size_t err_size) {
+  return tmuf_replay_load_ghost(data, size, 0, err, err_size);
+}
+
+tmuf_replay *tmuf_replay_load_ghost(const void *data, size_t size, uint32_t ghost, char *err, size_t err_size) {
   tmuf_replay *r = calloc(1, sizeof *r);
   if (!r || !(r->data = malloc(size ? size : 1))) {
     free(r);
@@ -333,7 +337,12 @@ tmuf_replay *tmuf_replay_load(const void *data, size_t size, char *err, size_t e
     tmuf_replay_free(r);
     return NULL;
   }
-  r->ghost = r->file.ghosts[0];
+  if (ghost >= r->file.ghost_count) {
+    tmuf_set_error(err, err_size, "replay: no ghost %u (it holds %u)", ghost, r->file.ghost_count);
+    tmuf_replay_free(r);
+    return NULL;
+  }
+  r->ghost = r->file.ghosts[ghost];
   if (r->ghost->has_inputs) {
     tmuf_control_tick *ticks = NULL;
     uint32_t n = tmuf_control_ticks(r->ghost, &ticks);
@@ -365,6 +374,8 @@ void tmuf_replay_free(tmuf_replay *r) {
   free(r->data);
   free(r);
 }
+
+uint32_t tmuf_replay_ghost_count(const tmuf_replay *r) { return r->file.ghost_count; }
 
 const void *tmuf_replay_map(const tmuf_replay *r, size_t *size) {
   if (size)
