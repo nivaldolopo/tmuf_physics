@@ -105,7 +105,10 @@ typedef struct tmuf_frame_control {
   float iso[12];         /* where its frame puts it: rotation rows, then the
                             translation (x, y, z) */
   float box[6];          /* its box: centre x, y, z, then half size x, y, z */
-  uint32_t align[2];     /* horizontal, vertical (CControlBase 0x0700100e) */
+  uint32_t align[2];     /* vertical (0..2, 4), then horizontal (0..2)
+                            (0x0700100e): CControlBase::GetOffsetFromAlign
+                            treats 4 as 1 and takes 4 only for the vertical,
+                            the only one of the two that is ever 4 */
   uint32_t flags;        /* CControlBase's flags word */
   const char *text;      /* the text it shows (a label's, a button's, or the
                             control's own), often a translation key */
@@ -128,6 +131,25 @@ TMUF_API tmuf_frame *tmuf_frame_load(const tmuf_packs *packs, const char *path, 
 TMUF_API size_t tmuf_frame_control_count(const tmuf_frame *frame);
 TMUF_API const tmuf_frame_control *tmuf_frame_controls(const tmuf_frame *frame);
 TMUF_API void tmuf_frame_free(tmuf_frame *frame);
+
+/* A control style file on its own (CControlStyle, 0x07017000, e.g.
+   MenuForever\Media\ControlStyle\TextRaceMessage.ControlStyle.Gbx): the
+   frames name their styles by file, and this reads what one says about
+   text. A style without a font of its own has font "" (the style sheet's
+   master style gives it). */
+typedef struct tmuf_control_style_info {
+  char font[128];      /* its font file's name, or "" */
+  float text_size[2];  /* the two reals after the font: the text's height
+                          in the frame's units, then a second real */
+  int has_color;
+  float color[4];      /* the text colour, r g b a */
+} tmuf_control_style_info;
+
+/* Reads a style file from the packs through the GBX parser. Returns 1 and
+   fills *out, or 0 with a message in err when it is missing, is not a
+   style, or doesn't parse to its end. */
+TMUF_API int tmuf_control_style_load(const tmuf_packs *packs, const char *path, tmuf_control_style_info *out,
+                                     char *err, size_t err_size);
 
 /* ---- tracks: everything about a map that does not change while driving ---- */
 

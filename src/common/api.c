@@ -271,6 +271,50 @@ void tmuf_frame_free(tmuf_frame *f) {
   free(f);
 }
 
+int tmuf_control_style_load(const tmuf_packs *packs, const char *path, tmuf_control_style_info *out, char *err,
+                            size_t err_size) {
+  if (out)
+    memset(out, 0, sizeof *out);
+  if (!packs || !path || !out) {
+    tmuf_set_error(err, err_size, "no packs, path or output");
+    return 0;
+  }
+  const tmuf_pack_ref ref = tmuf_packset_find(&packs->set, path);
+  if (ref.pack < 0) {
+    tmuf_set_error(err, err_size, "%s: not in the packs", path);
+    return 0;
+  }
+  const tmuf_pack *pack = &packs->set.packs[ref.pack];
+  tmuf_pack_stream ps;
+  if (!tmuf_pack_stream_open(&ps, pack, ref.file)) {
+    tmuf_set_error(err, err_size, "%s: cannot open", path);
+    return 0;
+  }
+  tmuf_arena arena;
+  tmuf_arena_init(&arena);
+  tmuf_gbx g;
+  tmuf_gbx_init(&g, &ps.base, &arena, tmuf_pack_classes, tmuf_pack_class_count);
+  g.feedback = 1;
+  const tmuf_control_style *st = tmuf_gbx_read_header(&g) ? tmuf_gbx_read_root(&g) : NULL;
+  const uint64_t size = pack->files[ref.file].uncompressed_size;
+  tmuf_pack_stream_close(&ps);
+  int ok = 0;
+  if (!st || g.error || g.pos != size)
+    tmuf_set_error(err, err_size, "%s: %s after %llu of %llu bytes", path, g.error ? g.message : "parse ended",
+                   (unsigned long long)g.pos, (unsigned long long)size);
+  else if (g.class_id != 0x07017000u)
+    tmuf_set_error(err, err_size, "%s: not a control style (%08x)", path, g.class_id);
+  else {
+    snprintf(out->font, sizeof out->font, "%s", node_file(st->font));
+    memcpy(out->text_size, st->text_size, sizeof out->text_size);
+    out->has_color = st->has_color;
+    memcpy(out->color, st->color, sizeof out->color);
+    ok = 1;
+  }
+  tmuf_arena_free(&arena);
+  return ok;
+}
+
 /* ---- replays ---- */
 
 tmuf_replay *tmuf_replay_load(const void *data, size_t size, char *err, size_t err_size) {
