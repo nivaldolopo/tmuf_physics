@@ -23,6 +23,12 @@ typedef struct tmuf_packset {
   tmuf_pack packs[TMUF_PACKLIST_MAX];
   uint32_t table_cap; /* power of two */
   tmuf_packset_entry *table;
+  /* Outside Windows: the GameData folder listings read so far, for matching
+     names case-insensitively (find_on_disk), behind their own lock. Listing a
+     folder for every file a track names cost seconds per track on a Switch SD
+     card. Folders are not read again: files added to GameData while the set is
+     open are not seen. */
+  struct tmuf_dir_cache *dirs;
 } tmuf_packset;
 
 typedef struct tmuf_pack_ref {

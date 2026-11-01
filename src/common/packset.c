@@ -6,6 +6,7 @@
 #include <windows.h>
 #else
 #include <dirent.h>
+#include <pthread.h>
 #endif
 
 #include <stdio.h>
@@ -48,6 +49,124 @@ static uint8_t *read_whole(const char *path, size_t *size) {
   *size = (size_t)n;
   return data;
 }
+
+#ifndef _WIN32
+/* One folder's entry names, as readdir gave them; exists 0 when it could not
+   be opened. Never changed once read, so its names stay valid until close. */
+typedef struct dir_listing {
+  char *path;
+  char **names;
+  uint32_t count;
+  int exists;
+} dir_listing;
+
+struct tmuf_dir_cache {
+  pthread_mutex_t lock;
+  dir_listing *dirs;
+  uint32_t count, cap;
+};
+
+static struct tmuf_dir_cache *dir_cache_new(void) {
+  struct tmuf_dir_cache *c = calloc(1, sizeof *c);
+  if (c && pthread_mutex_init(&c->lock, NULL) != 0) {
+    free(c);
+    c = NULL;
+  }
+  return c;
+}
+
+static void listing_free(dir_listing *l) {
+  for (uint32_t k = 0; k < l->count; k++)
+    free(l->names[k]);
+  free(l->names);
+  free(l->path);
+}
+
+static void dir_cache_free(struct tmuf_dir_cache *c) {
+  if (!c)
+    return;
+  for (uint32_t i = 0; i < c->count; i++)
+    listing_free(&c->dirs[i]);
+  free(c->dirs);
+  pthread_mutex_destroy(&c->lock);
+  free(c);
+}
+
+static char *copy_string(const char *s) {
+  const size_t n = strlen(s) + 1;
+  char *out = malloc(n);
+  if (out)
+    memcpy(out, s, n);
+  return out;
+}
+
+/* Reads folder l->path's names into l. */
+static void read_listing(dir_listing *l) {
+  DIR *d = opendir(l->path[0] ? l->path : ".");
+  if (!d)
+    return;
+  l->exists = 1;
+  uint32_t cap = 0;
+  const struct dirent *e;
+  while ((e = readdir(d)) != NULL) {
+    if (l->count == cap) {
+      const uint32_t grown = cap ? cap * 2 : 32;
+      char **names = realloc(l->names, grown * sizeof *names);
+      if (!names)
+        break;
+      l->names = names;
+      cap = grown;
+    }
+    if ((l->names[l->count] = copy_string(e->d_name)) != NULL)
+      l->count++;
+  }
+  closedir(d);
+}
+
+/* Folder path's listing in *out: read once, then from the cache (out->path
+   NULL: the names are the cache's). When it can't be kept (no cache, out of
+   memory) out holds its own copy (out->path set), freed by listing_free. */
+static void folder_listing(const tmuf_packset *set, const char *path, dir_listing *out) {
+  memset(out, 0, sizeof *out);
+  struct tmuf_dir_cache *c = set ? set->dirs : NULL;
+  if (!c) {
+    if ((out->path = copy_string(path)) != NULL)
+      read_listing(out);
+    return;
+  }
+  pthread_mutex_lock(&c->lock);
+  const dir_listing *found = NULL;
+  for (uint32_t i = 0; i < c->count && !found; i++)
+    if (strcmp(c->dirs[i].path, path) == 0)
+      found = &c->dirs[i];
+  if (!found) {
+    dir_listing l = {copy_string(path), NULL, 0, 0};
+    if (l.path)
+      read_listing(&l);
+    if (l.path && c->count == c->cap) {
+      const uint32_t grown = c->cap ? c->cap * 2 : 64;
+      dir_listing *dirs = realloc(c->dirs, grown * sizeof *dirs);
+      if (dirs) {
+        c->dirs = dirs;
+        c->cap = grown;
+      }
+    }
+    if (l.path && c->count < c->cap) {
+      c->dirs[c->count] = l;
+      found = &c->dirs[c->count++];
+    } else {
+      *out = l; /* not kept: the caller's copy */
+      pthread_mutex_unlock(&c->lock);
+      return;
+    }
+  }
+  /* copied out under the lock: the array moves when a folder is added */
+  out->names = found->names;
+  out->count = found->count;
+  out->exists = found->exists;
+  pthread_mutex_unlock(&c->lock);
+}
+#endif
 
 static void table_insert(tmuf_packset *set, uint64_t h, int pack, uint32_t file) {
   uint32_t mask = set->table_cap - 1;
@@ -105,6 +224,9 @@ int tmuf_packset_open(tmuf_packset *set, const char *dir, char *err, size_t err_
     for (uint32_t f = 0; f < set->packs[p].file_count; f++)
       if (tmuf_pack_file_path(&set->packs[p], f, path, sizeof path))
         table_insert(set, path_hash(path), p, f);
+#ifndef _WIN32
+  set->dirs = dir_cache_new(); /* NULL: each folder is read every time */
+#endif
   return 1;
 }
 
@@ -112,6 +234,9 @@ void tmuf_packset_close(tmuf_packset *set) {
   for (int i = 0; i < set->pack_count; i++)
     tmuf_pack_close(&set->packs[i]);
   free(set->table);
+#ifndef _WIN32
+  dir_cache_free(set->dirs);
+#endif
   memset(set, 0, sizeof *set);
 }
 
@@ -213,8 +338,9 @@ static int wide(const char *path, wchar_t *out, int out_count) {
 /* path (in out, '/' separated) made to exist on disk: each component after
    the base matched case-insensitively (Windows needs no help). A file or a
    directory. */
-static int find_on_disk(char *out, size_t out_size, size_t base_len) {
+static int find_on_disk(const tmuf_packset *set, char *out, size_t out_size, size_t base_len) {
 #ifdef _WIN32
+  (void)set;
   (void)base_len;
   (void)out_size;
   wchar_t w[1200];
@@ -233,31 +359,28 @@ static int find_on_disk(char *out, size_t out_size, size_t base_len) {
     size_t n = end ? (size_t)(end - p) : strlen(p);
     if (!n)
       break;
-    DIR *d = opendir(built[0] ? built : ".");
-    if (!d)
-      return 0;
-    const struct dirent *e;
+    dir_listing l;
+    folder_listing(set, built[0] ? built : "", &l);
     int found = 0;
-    while ((e = readdir(d)) != NULL) {
-      if (strlen(e->d_name) != n)
+    for (uint32_t i = 0; i < l.count && !found; i++) {
+      const char *name = l.names[i];
+      if (strlen(name) != n)
         continue;
       size_t k = 0;
-      while (k < n && tolower((unsigned char)e->d_name[k]) == tolower((unsigned char)p[k]))
+      while (k < n && tolower((unsigned char)name[k]) == tolower((unsigned char)p[k]))
         k++;
-      if (k == n) {
-        size_t len = strlen(built);
-        if (len + 1 + n + 1 > sizeof built) {
-          closedir(d);
-          return 0;
-        }
-        built[len] = '/';
-        memcpy(built + len + 1, e->d_name, n);
-        built[len + 1 + n] = 0;
-        found = 1;
+      if (k < n)
+        continue;
+      size_t len = strlen(built);
+      if (len + 1 + n + 1 > sizeof built)
         break;
-      }
+      built[len] = '/';
+      memcpy(built + len + 1, name, n);
+      built[len + 1 + n] = 0;
+      found = 1;
     }
-    closedir(d);
+    if (l.path)
+      listing_free(&l);
     if (!found)
       return 0;
     p += n;
@@ -270,12 +393,13 @@ static int find_on_disk(char *out, size_t out_size, size_t base_len) {
 }
 
 /* dir/<up to depth folders>/rel on disk (case-insensitive): the first found */
-static int find_below(const char *dir, const char *rel, int depth, char *out, size_t out_size) {
+static int find_below(const tmuf_packset *set, const char *dir, const char *rel, int depth, char *out,
+                      size_t out_size) {
   char full[2048];
   const int len = snprintf(full, sizeof full, "%s/%s", dir, rel);
   if (len < 0 || (size_t)len >= sizeof full)
     return 0;
-  if (find_on_disk(full, sizeof full, strlen(dir))) {
+  if (find_on_disk(set, full, sizeof full, strlen(dir))) {
     snprintf(out, out_size, "%s", full);
     return 1;
   }
@@ -301,7 +425,7 @@ static int find_below(const char *dir, const char *rel, int depth, char *out, si
     const int sn = snprintf(sub, sizeof sub, "%s/%s", dir, name);
     if (sn < 0 || (size_t)sn >= sizeof sub)
       continue;
-    found = find_below(sub, rel, depth - 1, out, out_size);
+    found = find_below(set, sub, rel, depth - 1, out, out_size);
   } while (!found && FindNextFileW(h, &fd));
   FindClose(h);
   return found;
@@ -322,7 +446,7 @@ static int find_below(const char *dir, const char *rel, int depth, char *out, si
     if (!probe)
       continue;
     closedir(probe);
-    found = find_below(sub, rel, depth - 1, out, out_size);
+    found = find_below(set, sub, rel, depth - 1, out, out_size);
   }
   closedir(d);
   return found;
@@ -345,7 +469,7 @@ int tmuf_packset_find_file(const tmuf_packset *set, const char *plain, char *out
   for (char *c = full + strlen(base); *c; c++)
     if (*c == '\\')
       *c = '/';
-  if (!find_on_disk(full, sizeof full, strlen(base)))
+  if (!find_on_disk(set, full, sizeof full, strlen(base)))
     return 0;
   snprintf(out, out_size, "%s", full);
   return 1;
@@ -384,7 +508,7 @@ int tmuf_packset_resolve_file(const tmuf_packset *set, const tmuf_gbx *g, const 
     for (char *c = full + strlen(base); *c; c++)
       if (*c == '\\')
         *c = '/';
-    if (find_on_disk(full, sizeof full, strlen(base))) {
+    if (find_on_disk(set, full, sizeof full, strlen(base))) {
       snprintf(out, out_size, "%s", full);
       return 1;
     }
@@ -406,7 +530,7 @@ int tmuf_packset_resolve_file(const tmuf_packset *set, const tmuf_gbx *g, const 
   size_t sl = strlen(start);
   while (sl > 0 && start[sl - 1] == '/')
     start[--sl] = 0;
-  if (!find_on_disk(start, sizeof start, strlen(base)))
+  if (!find_on_disk(set, start, sizeof start, strlen(base)))
     return 0;
-  return find_below(start, path, 3, out, out_size);
+  return find_below(set, start, path, 3, out, out_size);
 }
