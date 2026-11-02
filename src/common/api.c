@@ -138,18 +138,22 @@ struct tmuf_frame {
   size_t count, cap;
 };
 
-static int derives_from_frame(uint32_t class_id) {
+static int derives_from(uint32_t class_id, uint32_t base) {
   for (int depth = 0; depth < 32 && class_id && class_id != 0xffffffffu; depth++) {
-    if (class_id == 0x07016000u)
+    if (class_id == base)
       return 1;
     class_id = tmuf_class_parent(class_id);
   }
   return 0;
 }
 
+static int derives_from_frame(uint32_t class_id) { return derives_from(class_id, 0x07016000u); }
+
 static const char *node_file(const tmuf_gbx_node *n) {
   return n && n->external && n->file ? n->file : "";
 }
+
+static void frame_add_child(tmuf_frame *f, const tmuf_control_child *ch, int parent, int depth);
 
 static void frame_add(tmuf_frame *f, const tmuf_gbx_node *n, int parent, const float *iso, const char *instance_name,
                       int depth) {
@@ -182,10 +186,10 @@ static void frame_add(tmuf_frame *f, const tmuf_gbx_node *n, int parent, const f
     out->file = node_file(n);
     return;
   }
-  const tmuf_control *c = n->data;
+  const tmuf_control *c = derives_from(n->class_id, 0x07001000u) ? n->data : NULL;
   if (!c)
     return;
-  if (c->name && c->name[0])
+  if (!out->name[0] && c->name && c->name[0]) /* an instance keeps its own id */
     out->name = c->name;
   memcpy(out->box, c->box, sizeof out->box);
   memcpy(out->align, c->align, sizeof out->align);
@@ -212,10 +216,29 @@ static void frame_add(tmuf_frame *f, const tmuf_gbx_node *n, int parent, const f
       out->style = st->name;
   }
   for (uint32_t i = 0; i < c->child_count; i++)
-    frame_add(f, c->children[i].control, index, c->children[i].iso, c->children[i].name, depth + 1);
+    frame_add_child(f, &c->children[i], index, depth + 1);
 }
 
-tmuf_frame *tmuf_frame_load(const tmuf_packs *packs, const char *path, char *err, size_t err_size) {
+/* A child, then what an instance puts in its model's anchors: each
+   anchor's children under the control of that name below the child */
+static void frame_add_child(tmuf_frame *f, const tmuf_control_child *ch, int parent, int depth) {
+  const size_t first = f->count;
+  frame_add(f, ch->control, parent, ch->iso, ch->name, depth);
+  for (uint32_t a = 0; a < ch->anchor_count; a++) {
+    const tmuf_control *anchor = &ch->anchors[a];
+    int at = -1;
+    for (size_t i = first; i < f->count && at < 0; i++)
+      if (anchor->name && strcmp(f->controls[i].name, anchor->name) == 0)
+        at = (int)i;
+    if (at < 0)
+      continue;
+    for (uint32_t i = 0; i < anchor->child_count; i++)
+      frame_add_child(f, &anchor->children[i], at, depth + 1);
+  }
+}
+
+/* Parses a frame (menu 0) or menu (menu 1) file into a new tmuf_frame */
+static tmuf_frame *controls_load(const tmuf_packs *packs, const char *path, int menu, char *err, size_t err_size) {
   if (!packs || !path) {
     tmuf_set_error(err, err_size, "no packs or path");
     return NULL;
@@ -241,7 +264,7 @@ tmuf_frame *tmuf_frame_load(const tmuf_packs *packs, const char *path, char *err
   tmuf_gbx g;
   tmuf_gbx_init(&g, &ps.base, &f->arena, tmuf_pack_classes, tmuf_pack_class_count);
   g.feedback = 1;
-  const tmuf_control *root = tmuf_gbx_read_header(&g) ? tmuf_gbx_read_root(&g) : NULL;
+  const void *root = tmuf_gbx_read_header(&g) ? tmuf_gbx_read_root(&g) : NULL;
   const uint64_t size = pack->files[ref.file].uncompressed_size;
   tmuf_pack_stream_close(&ps);
   if (!root || g.error || g.pos != size) {
@@ -250,13 +273,27 @@ tmuf_frame *tmuf_frame_load(const tmuf_packs *packs, const char *path, char *err
     tmuf_frame_free(f);
     return NULL;
   }
-  if (!derives_from_frame(g.class_id)) {
-    tmuf_set_error(err, err_size, "%s: not a frame (%08x)", path, g.class_id);
+  if (menu ? g.class_id != 0x03009000u : !derives_from_frame(g.class_id)) {
+    tmuf_set_error(err, err_size, "%s: not a %s (%08x)", path, menu ? "menu" : "frame", g.class_id);
     tmuf_frame_free(f);
     return NULL;
   }
-  frame_add(f, &g.nodes[0], -1, NULL, NULL, 0);
+  if (!menu) {
+    frame_add(f, &g.nodes[0], -1, NULL, NULL, 0);
+    return f;
+  }
+  const tmuf_game_menu *m = root;
+  for (uint32_t i = 0; i < m->frame_count; i++)
+    frame_add_child(f, &m->frames[i], -1, 0);
   return f;
+}
+
+tmuf_frame *tmuf_frame_load(const tmuf_packs *packs, const char *path, char *err, size_t err_size) {
+  return controls_load(packs, path, 0, err, err_size);
+}
+
+tmuf_frame *tmuf_menu_load(const tmuf_packs *packs, const char *path, char *err, size_t err_size) {
+  return controls_load(packs, path, 1, err, err_size);
 }
 
 size_t tmuf_frame_control_count(const tmuf_frame *f) { return f ? f->count : 0; }

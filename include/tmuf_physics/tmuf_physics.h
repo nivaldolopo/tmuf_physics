@@ -99,7 +99,8 @@ typedef struct tmuf_frame_control {
   int parent;            /* index of its frame in the list, -1 for the root */
   uint32_t class_id;     /* e.g. 0x07006000 CControlLabel, 0x0701b000 CControlQuad */
   const char *class_name;
-  const char *name;      /* its id (CSceneObject 0x0a005001) */
+  const char *name;      /* its id (CSceneObject 0x0a005001), or an instanced
+                            control's own id */
   const char *file;      /* a frame instanced from another file: that file's
                             name (its controls are not in this list) */
   float iso[12];         /* where its frame puts it: rotation rows, then the
@@ -128,6 +129,11 @@ typedef struct tmuf_frame tmuf_frame;
    encrypted with the parser's feedback, like fonts). Returns NULL with a
    message in err when it is missing or doesn't parse to its end. */
 TMUF_API tmuf_frame *tmuf_frame_load(const tmuf_packs *packs, const char *path, char *err, size_t err_size);
+/* Reads a menu file (CGameMenu, 0x03009000, e.g. Game.pak's Menu\52B686...,
+   whose names are hidden) the same way: each of its dialog frames
+   (CGameMenuFrame) is a root (parent -1) named by its id, its controls
+   below it. */
+TMUF_API tmuf_frame *tmuf_menu_load(const tmuf_packs *packs, const char *path, char *err, size_t err_size);
 TMUF_API size_t tmuf_frame_control_count(const tmuf_frame *frame);
 TMUF_API const tmuf_frame_control *tmuf_frame_controls(const tmuf_frame *frame);
 TMUF_API void tmuf_frame_free(tmuf_frame *frame);

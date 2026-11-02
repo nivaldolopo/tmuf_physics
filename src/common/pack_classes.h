@@ -809,6 +809,10 @@ typedef struct tmuf_control_child {
   tmuf_gbx_node *control;
   const char *name; /* an instanced model's own id (its own data) */
   float iso[12];
+  /* an instance's anchors: containers of the model (each a name and the
+     children the instance puts in it) */
+  uint32_t anchor_count;
+  struct tmuf_control *anchors;
 } tmuf_control_child;
 
 /* The interface controls (CControlBase 0x07001000 and the classes below
@@ -834,9 +838,19 @@ typedef struct tmuf_control {
   float quad_size[2];       /* CControlQuad 0x0701b0xx */
   const char *quad_id;      /* CControlQuad 0x0701b006 */
   tmuf_gbx_node *image;     /* CControlUiElement 0x07004000 / Button icon */
+  int has_item;            /* 0x0a011005: its mobil's item archived inline */
   uint32_t child_count;     /* CControlContainer: its children */
   tmuf_control_child *children;
 } tmuf_control;
+
+/* CGameMenu (0x03009000): a menu file's frames (0x03009003, each a
+   CGameMenuFrame placed by CSceneMobil::DoMobilPtr) and the one shown
+   first */
+typedef struct tmuf_game_menu {
+  uint32_t frame_count;
+  tmuf_control_child *frames;
+  uint32_t main_frame;
+} tmuf_game_menu;
 
 extern const tmuf_gbx_class *const tmuf_pack_classes[];
 extern const size_t tmuf_pack_class_count;

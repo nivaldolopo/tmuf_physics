@@ -9,6 +9,7 @@
  *   tmuf_inspect gbx PACKS_DIR PACK PATH    parse a pack file with feedback,
  *                                           print header info and mixed values
  *   tmuf_inspect vehicle PACKS_DIR NAME     print a vehicle's solid tree
+ *   tmuf_inspect menu PACKS_DIR PATH        a menu file's dialogs and their controls
  *   tmuf_inspect catp PACKS_DIR PATH OUT    extract a file by its plain path
  *   tmuf_inspect refs PACKS_DIR LIST        resolve the external references of
  *                                           every file in LIST (verify format)
@@ -667,14 +668,14 @@ static void dump_tree(tmuf_assets *assets, tmuf_asset *owner, tmuf_gbx_node *nod
 
 /* Prints an interface frame's controls (tmuf_frame_load), one per line,
    indented under their frame. */
-static int cmd_frame(const char *packs_dir, const char *path) {
+static int cmd_frame(const char *packs_dir, const char *path, int menu) {
   char err[512] = "";
   tmuf_packs *packs = tmuf_packs_open(packs_dir, err, sizeof err);
   if (!packs) {
     fprintf(stderr, "%s\n", err);
     return 1;
   }
-  tmuf_frame *f = tmuf_frame_load(packs, path, err, sizeof err);
+  tmuf_frame *f = menu ? tmuf_menu_load(packs, path, err, sizeof err) : tmuf_frame_load(packs, path, err, sizeof err);
   if (!f) {
     fprintf(stderr, "%s\n", err);
     tmuf_packs_close(packs);
@@ -807,7 +808,9 @@ int main(int argc, char **argv) {
   if (argc >= 4 && strcmp(argv[1], "solid") == 0)
     return cmd_solid(argv[2], argv[3]);
   if (argc >= 4 && strcmp(argv[1], "frame") == 0)
-    return cmd_frame(argv[2], argv[3]);
+    return cmd_frame(argv[2], argv[3], 0);
+  if (argc >= 4 && strcmp(argv[1], "menu") == 0)
+    return cmd_frame(argv[2], argv[3], 1);
   if (argc >= 5 && strcmp(argv[1], "catp") == 0)
     return cmd_catp(argv[2], argv[3], argv[4]);
   if (argc >= 4 && strcmp(argv[1], "vehicle") == 0)

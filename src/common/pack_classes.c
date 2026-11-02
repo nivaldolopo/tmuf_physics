@@ -2713,24 +2713,36 @@ static const tmuf_gbx_class ZONE = {0x0305c000, "CGameCtnZone", sizeof(tmuf_zone
 /* ---- CSceneObjectLink (0x0a014000) ---- */
 
 /* CSceneMobil::ArchiveOwnDataOld (reading), for a model instance. */
-static void mobil_own_data_into(tmuf_gbx *g, const char **name, tmuf_node_list *children) {
+/* own_chunk: reads one instance chunk of version 2's list (NULL: the
+   chunk is taken as empty, as CSceneMobil's own) */
+typedef void (*mobil_own_chunk_fn)(tmuf_gbx *g, uint32_t class_id, uint32_t number);
+
+static void mobil_own_data_with(tmuf_gbx *g, const char **name, tmuf_node_list *children, mobil_own_chunk_fn own_chunk) {
   uint32_t version = tmuf_gbx_u32(g);
   if (version == 0) {
     *name = id_text(g);
     return;
   }
   if (version == 2) {
-    /* (class, size) pairs until -1; CSceneMobil does not consume the data. */
+    /* (class, number) pairs until -1, each followed by what the mobil's
+       class archives for it (the exe's virtual +0xcc) */
     for (int guard = 0; guard < 4096 && !g->error; guard++) {
-      if (tmuf_wrap_class_id(tmuf_gbx_u32(g)) == 0xffffffffu)
+      uint32_t cls = tmuf_wrap_class_id(tmuf_gbx_u32(g));
+      if (cls == 0xffffffffu)
         break;
-      tmuf_gbx_u32(g);
+      uint32_t number = tmuf_gbx_u32(g);
+      if (own_chunk)
+        own_chunk(g, cls, number);
     }
   } else if (version != 1) {
     return;
   }
   *name = id_text(g);
   read_node_list(g, children);
+}
+
+static void mobil_own_data_into(tmuf_gbx *g, const char **name, tmuf_node_list *children) {
+  mobil_own_data_with(g, name, children, NULL);
 }
 
 static void mobil_own_data(tmuf_gbx *g, tmuf_object_link *l) {
@@ -3716,10 +3728,15 @@ static void control_node_list(tmuf_gbx *g, void *node, uint32_t id) {
 /* CControlBase overrides CSceneMobil's 0x0a011005: a bool, then the
    mobil's tree item when set */
 static void control_c0a011005(tmuf_gbx *g, void *node, uint32_t id) {
-  UNUSED(node);
   UNUSED(id);
-  if (tmuf_gbx_bool(g))
-    tmuf_gbx_fail(g, "control with a tree item (0x0a011005)");
+  if (tmuf_gbx_bool(g)) {
+    /* CControlBase::Chunk (0x7629c0): the mobil's item archives itself
+       inline (its own chunks) */
+    tmuf_hms_item item;
+    memset(&item, 0, sizeof item);
+    tmuf_gbx_node_body(g, &HMS_ITEM, &item);
+    ((tmuf_control *)node)->has_item = 1;
+  }
 }
 
 /* CControlBase::CStyleSheetElem::Archive (the exe's 0x762820): a name in
@@ -3792,6 +3809,25 @@ static uint32_t control_default_flags(uint32_t class_id) {
     f = (f & 0xfffff7d7u) | 2;
   if (derives_from(class_id, 0x07009000u))
     f |= 0x100;
+  /* the constructors below change bits 0x20 / 0x100 again (the exe's
+     "OR / AND [this + 0xfc]" in each ??0) */
+  static const struct {
+    uint32_t class_id, set, clear;
+  } CTORS[] = {
+      {0x0700f000u, 0x220, 0x0a}, /* CControlList @ 0x77ad80 (AND ~0x0a, OR 0x220) */
+      {0x07030000u, 0x22, 0},     /* CControlPager @ 0x786ab0 */
+      {0x07014000u, 0x22, 0},     /* CControlUiRange @ 0x777850 */
+      {0x07029000u, 0x20, 0},     /* CControlListMap2 @ 0x797440 */
+      {0x07013000u, 0, 0x20},     /* CControlOverlay @ 0x790de0 */
+      {0x0701e000u, 0, 0x102},    /* CControlColorChooser @ 0x784c80 */
+      {0x07012000u, 0, 0x02},     /* CControlForm @ 0x79b6e0 */
+      {0x0309a000u, 0x20, 0},     /* CGameControlCard @ 0x5a0a40 */
+      {0x030de000u, 0x20, 0},     /* CGameControlGridCtnCampaign @ 0x7463f0 */
+      {0x030df000u, 0x20, 0},     /* CGameControlGridCtnChallengeGroup @ 0x745570 */
+  };
+  for (size_t i = 0; i < COUNT(CTORS); i++)
+    if (derives_from(class_id, CTORS[i].class_id))
+      f = (f | CTORS[i].set) & ~CTORS[i].clear;
   return f;
 }
 
@@ -3902,33 +3938,87 @@ static void control_terminal_data(tmuf_gbx *g) {
   }
 }
 
+static void control_children(tmuf_gbx *g, tmuf_control *c);
+
 /* InternalDoMobilPtr (0x7b2350): the model, then the instance's own data,
    ArchiveOwnDataOld of the model's class: CSceneMobil's (a version, its
    id, its objects), then for a container CControlContainer's (a version,
-   its anchors' children, from version 3 the children's instance data) */
-static tmuf_gbx_node *control_instance(tmuf_gbx *g, const char **name) {
+   its anchors' children, from version 3 the children's instance data);
+   without a model (a null reference) the mobil itself, a reference */
+/* An instanced control's own chunk (version 2 of its own data): the
+   number n gives the class's chunk n - 1 (CGameControlCardGeneric
+   0x030bd000 with 5: its 004, the local data), read as that class's
+   Chunk reads it */
+static void control_own_chunk(tmuf_gbx *g, uint32_t class_id, uint32_t number) {
+  const uint32_t chunk = class_id + number - 1;
+  for (size_t i = 0; i < tmuf_pack_class_count; i++) {
+    const tmuf_gbx_class *cls = tmuf_pack_classes[i];
+    if (cls->id != class_id)
+      continue;
+    for (size_t j = 0; j < cls->chunk_count; j++) {
+      if (cls->chunks[j].id != chunk || !cls->chunks[j].read)
+        continue;
+      tmuf_control scratch;
+      memset(&scratch, 0, sizeof scratch);
+      const uint32_t saved = g->node_class;
+      g->node_class = class_id;
+      cls->chunks[j].read(g, &scratch, chunk);
+      g->node_class = saved;
+      return;
+    }
+  }
+  tmuf_gbx_fail(g, "instance chunk %08x (class %08x, %u) has no reader", chunk, class_id, number);
+}
+
+static tmuf_gbx_node *control_instance(tmuf_gbx *g, tmuf_control_child *ch) {
   tmuf_gbx_node *model = tmuf_gbx_noderef(g);
-  if (!model || g->error)
-    return model;
+  if (g->error)
+    return NULL;
+  if (!model) /* no model: the mobil itself follows, as a plain reference */
+    return tmuf_gbx_noderef(g);
   tmuf_node_list objects;
   memset(&objects, 0, sizeof objects);
-  mobil_own_data_into(g, name, &objects);
+  mobil_own_data_with(g, &ch->name, &objects, control_own_chunk);
   if (!is_container(model))
     return model;
   uint32_t version = tmuf_gbx_u32(g);
   uint32_t anchors = tmuf_gbx_u32(g);
-  if (anchors) {
+  if (anchors > 256) {
     tmuf_gbx_fail(g, "control instance with %u anchors", anchors);
     return model;
   }
+  /* per anchor (a container of the model, found by its id) its id, then
+     its children, archived by the anchor's own class: taken as a frame's
+     (the model may be in another file) */
+  ch->anchors = TMUF_ARENA_ARRAY(g->arena, tmuf_control, anchors ? anchors : 1);
+  ch->anchor_count = anchors;
+  for (uint32_t i = 0; i < anchors && !g->error; i++) {
+    tmuf_control *anchor = &ch->anchors[i];
+    memset(anchor, 0, sizeof *anchor);
+    anchor->name = id_text(g);
+    const uint32_t saved = g->node_class;
+    g->node_class = 0x07016000u;
+    control_children(g, anchor);
+    g->node_class = saved;
+  }
   if (version > 2)
     control_terminal_data(g);
+  if (!model->external && derives_from(model->class_id, 0x0300b000u)) {
+    /* CGameMenuFrame::ArchiveOwnDataOld (0x72ffa0): a version, its three
+       scripts (before show, show, hide), then an id (the exe tests a field
+       the model sets; the files always have it) */
+    tmuf_gbx_u32(g);
+    tmuf_gbx_noderef(g);
+    tmuf_gbx_noderef(g);
+    tmuf_gbx_noderef(g);
+    id_text(g);
+  }
   return model;
 }
 
 /* CSceneMobil::DoMobilPtr, versioned: -1 none, -2 a plain reference, else
    an internal reference slot, given on its first use */
-static tmuf_gbx_node *control_mobil_ptr(tmuf_gbx *g, const char **name) {
+static tmuf_gbx_node *control_mobil_ptr(tmuf_gbx *g, tmuf_control_child *ch) {
   uint32_t v = tmuf_gbx_u32(g);
   if (g->error || v == 0xffffffffu)
     return NULL;
@@ -3938,7 +4028,7 @@ static tmuf_gbx_node *control_mobil_ptr(tmuf_gbx *g, const char **name) {
   if (!slot)
     return NULL;
   if (!*slot) {
-    tmuf_gbx_node *m = control_instance(g, name);
+    tmuf_gbx_node *m = control_instance(g, ch);
     *slot = m ? (void *)m : (void *)g; /* g: taken, no model */
     return m;
   }
@@ -3947,8 +4037,9 @@ static tmuf_gbx_node *control_mobil_ptr(tmuf_gbx *g, const char **name) {
 
 /* CControlContainer::ArchiveChilds: a version, the count, then per child
    (CControlFrame::ArchiveChild: a version first, and after the child its
-   placement) CControlContainer::ArchiveChild: 1 a plain reference, 2
-   InternalDoMobilPtr, 3 CSceneMobil::DoMobilPtr */
+   placement) CControlContainer::ArchiveChild (0x765ea0): 1 a plain
+   reference, 2 InternalDoMobilPtr, else (3, and 0 in the menus)
+   CSceneMobil::DoMobilPtr */
 static void control_children(tmuf_gbx *g, tmuf_control *c) {
   tmuf_gbx_u32(g);
   uint32_t n = tmuf_gbx_u32(g);
@@ -3957,25 +4048,36 @@ static void control_children(tmuf_gbx *g, tmuf_control *c) {
     return;
   }
   const int frame = derives_from(g->node_class, 0x07016000u);
+  const int menu_frame = derives_from(g->node_class, 0x0300b000u);
+  const int grid = derives_from(g->node_class, 0x07015000u);
   c->children = TMUF_ARENA_ARRAY(g->arena, tmuf_control_child, n ? n : 1);
   c->child_count = n;
   for (uint32_t i = 0; i < n && !g->error; i++) {
     tmuf_control_child *ch = &c->children[i];
-    if (frame)
+    if (menu_frame) /* CGameMenuFrame::ArchiveChild (0x72f340): a version first */
       tmuf_gbx_u32(g);
+    uint32_t grid_version = 0;
+    if (frame || grid)
+      grid_version = tmuf_gbx_u32(g);
     uint32_t kind = tmuf_gbx_u32(g);
     if (kind == 1) {
       ch->control = tmuf_gbx_noderef(g);
     } else if (kind == 2) {
-      ch->control = control_instance(g, &ch->name);
-    } else if (kind == 3) {
-      ch->control = control_mobil_ptr(g, &ch->name);
+      ch->control = control_instance(g, ch);
+    } else if (kind == 3 || kind == 0) { /* the game takes any kind but 1 and 2 as 3 */
+      ch->control = control_mobil_ptr(g, ch);
     } else {
       tmuf_gbx_fail(g, "control child kind %u", kind);
       return;
     }
-    if (frame)
+    if (frame) {
       read_floats(g, ch->iso, 12);
+    } else if (grid) {
+      /* CControlGrid::ArchiveChild (0x76d1a0): its place in the grid, x y
+         (version 0) or x y z, kept as a translation */
+      ch->iso[0] = ch->iso[4] = ch->iso[8] = 1.0f;
+      read_floats(g, ch->iso + 9, grid_version == 0 ? 2 : 3);
+    }
   }
 }
 
@@ -4028,6 +4130,257 @@ static void c07016000(tmuf_gbx *g, void *node, uint32_t id) {
 static const tmuf_gbx_chunk CONTROL_FRAME_CHUNKS[] = {READ(0x07016000, c07016000)};
 static const tmuf_gbx_class CONTROL_FRAME = {0x07016000, "CControlFrame", sizeof(tmuf_control),
                                              CONTROL_FRAME_CHUNKS, COUNT(CONTROL_FRAME_CHUNKS), &CONTROL_CONTAINER};
+
+/* CControlGrid::Chunk (0x76cfb0): 000 a real per child; 001 a reference,
+   two bools, two reals; 002 a counted real array; 003 that and a bool;
+   004 two bools; 005 two reals */
+static void grid_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  tmuf_control *c = node;
+  switch (id) {
+  case 0x07015000u:
+    for (uint32_t i = 0; i < c->child_count && !g->error; i++)
+      tmuf_gbx_f32(g);
+    return;
+  case 0x07015001u:
+    tmuf_gbx_noderef(g);
+    tmuf_gbx_bool(g);
+    tmuf_gbx_bool(g);
+    tmuf_gbx_f32(g);
+    tmuf_gbx_f32(g);
+    return;
+  case 0x07015002u:
+  case 0x07015003u: {
+    uint32_t n = tmuf_gbx_u32(g);
+    if (n > 4096) {
+      tmuf_gbx_fail(g, "grid real count %u", n);
+      return;
+    }
+    for (uint32_t i = 0; i < n && !g->error; i++)
+      tmuf_gbx_f32(g);
+    if (id == 0x07015003u)
+      tmuf_gbx_bool(g);
+    return;
+  }
+  case 0x07015004u:
+    tmuf_gbx_bool(g);
+    tmuf_gbx_bool(g);
+    return;
+  default: /* 005 */
+    tmuf_gbx_f32(g);
+    tmuf_gbx_f32(g);
+  }
+}
+
+static const tmuf_gbx_chunk CONTROL_GRID_CHUNKS[] = {
+    READ(0x07015000, grid_chunk), READ(0x07015001, grid_chunk), READ(0x07015002, grid_chunk),
+    READ(0x07015003, grid_chunk), READ(0x07015004, grid_chunk), READ(0x07015005, grid_chunk)};
+static const tmuf_gbx_class CONTROL_GRID = {0x07015000, "CControlGrid", sizeof(tmuf_control), CONTROL_GRID_CHUNKS,
+                                            COUNT(CONTROL_GRID_CHUNKS), &CONTROL_CONTAINER};
+
+/* CControlPager::Chunk (0x7866c0): 000 seven controls (its buttons and
+   labels, CSceneMobil::DoMobilPtr) and two style sheet elements; 001 a
+   string */
+static void pager_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  if (id == 0x07030001u) {
+    tmuf_gbx_string(g);
+    return;
+  }
+  tmuf_control_child ch;
+  for (int i = 0; i < 7 && !g->error; i++) {
+    memset(&ch, 0, sizeof ch);
+    control_mobil_ptr(g, &ch);
+  }
+  style_sheet_elem(g, NULL);
+  style_sheet_elem(g, NULL);
+}
+
+static const tmuf_gbx_chunk CONTROL_PAGER_CHUNKS[] = {READ(0x07030000, pager_chunk), READ(0x07030001, pager_chunk)};
+static const tmuf_gbx_class CONTROL_PAGER = {0x07030000, "CControlPager", sizeof(tmuf_control),
+                                             CONTROL_PAGER_CHUNKS, COUNT(CONTROL_PAGER_CHUNKS), &CONTROL_FRAME};
+
+/* CGameControlCard::Chunk (0x59f950): 000 a bool, 001 two, 002 three */
+static void card_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  for (uint32_t i = 0; i <= id - 0x0309a000u && !g->error; i++)
+    tmuf_gbx_bool(g);
+}
+
+static const tmuf_gbx_chunk GAME_CARD_CHUNKS[] = {READ(0x0309a000, card_chunk), READ(0x0309a001, card_chunk),
+                                                  READ(0x0309a002, card_chunk)};
+static const tmuf_gbx_class GAME_CARD = {0x0309a000, "CGameControlCard", sizeof(tmuf_control), GAME_CARD_CHUNKS,
+                                         COUNT(GAME_CARD_CHUNKS), &CONTROL_FRAME};
+
+/* CGameControlGrid::Chunk (0x64ca60): 000 four numbers, five references;
+   001 two references; 002, 003 a bool; 004 a reference, two bools; 005 a
+   control (CSceneMobil::DoMobilPtr), two bools */
+static void game_grid_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  tmuf_control_child ch;
+  memset(&ch, 0, sizeof ch);
+  switch (id) {
+  case 0x030b9000u:
+    for (int i = 0; i < 4; i++)
+      tmuf_gbx_u32(g);
+    for (int i = 0; i < 5 && !g->error; i++)
+      tmuf_gbx_noderef(g);
+    return;
+  case 0x030b9001u:
+    tmuf_gbx_noderef(g);
+    tmuf_gbx_noderef(g);
+    return;
+  case 0x030b9002u:
+  case 0x030b9003u:
+    tmuf_gbx_bool(g);
+    return;
+  case 0x030b9004u:
+    tmuf_gbx_noderef(g);
+    break;
+  default: /* 005 */
+    control_mobil_ptr(g, &ch);
+  }
+  tmuf_gbx_bool(g);
+  tmuf_gbx_bool(g);
+}
+
+static const tmuf_gbx_chunk GAME_GRID_CHUNKS[] = {
+    READ(0x030b9000, game_grid_chunk), READ(0x030b9001, game_grid_chunk), READ(0x030b9002, game_grid_chunk),
+    READ(0x030b9003, game_grid_chunk), READ(0x030b9004, game_grid_chunk), READ(0x030b9005, game_grid_chunk)};
+static const tmuf_gbx_class GAME_GRID = {0x030b9000, "CGameControlGrid", sizeof(tmuf_control), GAME_GRID_CHUNKS,
+                                         COUNT(GAME_GRID_CHUNKS), &CONTROL_GRID};
+
+/* CGameControlGridCtnCampaign::Chunk (0x745b20): 000 a number, two
+   references; 001 a reference. CGameControlGridCtnChallengeGroup::Chunk
+   (0x745160): 000 a number, a reference */
+static void grid_campaign_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  if (id == 0x030de001u) {
+    tmuf_gbx_noderef(g);
+    return;
+  }
+  tmuf_gbx_u32(g);
+  tmuf_gbx_noderef(g);
+  if (id == 0x030de000u)
+    tmuf_gbx_noderef(g);
+}
+
+static const tmuf_gbx_chunk GRID_CAMPAIGN_CHUNKS[] = {READ(0x030de000, grid_campaign_chunk),
+                                                      READ(0x030de001, grid_campaign_chunk)};
+static const tmuf_gbx_class GRID_CAMPAIGN = {0x030de000, "CGameControlGridCtnCampaign", sizeof(tmuf_control),
+                                             GRID_CAMPAIGN_CHUNKS, COUNT(GRID_CAMPAIGN_CHUNKS), &CONTROL_GRID};
+static const tmuf_gbx_chunk GRID_GROUP_CHUNKS[] = {READ(0x030df000, grid_campaign_chunk)};
+static const tmuf_gbx_class GRID_GROUP = {0x030df000, "CGameControlGridCtnChallengeGroup", sizeof(tmuf_control),
+                                          GRID_GROUP_CHUNKS, COUNT(GRID_GROUP_CHUNKS), &CONTROL_GRID};
+
+/* CGameControlGridCard::Chunk (0x5bed20): 000 a node list (its data types);
+   001 a reference; 002 a reference, a bool, a string, a number; 003 that
+   and a bool; 004 that and two bools */
+static void grid_card_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  if (id == 0x030ba000u) {
+    tmuf_node_list l;
+    read_node_list(g, &l);
+    return;
+  }
+  tmuf_gbx_noderef(g);
+  if (id == 0x030ba001u)
+    return;
+  tmuf_gbx_bool(g);
+  tmuf_gbx_string(g);
+  tmuf_gbx_u32(g);
+  if (id >= 0x030ba003u)
+    tmuf_gbx_bool(g);
+  if (id == 0x030ba004u)
+    tmuf_gbx_bool(g);
+}
+
+static const tmuf_gbx_chunk GRID_CARD_CHUNKS[] = {
+    READ(0x030ba000, grid_card_chunk), READ(0x030ba001, grid_card_chunk), READ(0x030ba002, grid_card_chunk),
+    READ(0x030ba003, grid_card_chunk), READ(0x030ba004, grid_card_chunk)};
+static const tmuf_gbx_class GRID_CARD = {0x030ba000, "CGameControlGridCard", sizeof(tmuf_control), GRID_CARD_CHUNKS,
+                                         COUNT(GRID_CARD_CHUNKS), &GAME_GRID};
+
+/* CGameControlCardGeneric::Chunk (0x646d40): 000 a number; 001, 003, 004
+   ArchiveLocalData (0x646b90) with version 0, 1, 2: from 1 the version as
+   a byte, a bool, then when set three strings, four texts (from version
+   2 seven), three numbers and three reals */
+static void card_generic_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  if (id == 0x030bd000u) {
+    tmuf_gbx_u32(g);
+    return;
+  }
+  uint32_t version = id == 0x030bd001u ? 0 : tmuf_gbx_u8(g); /* DoNatural into a byte */
+  if (!tmuf_gbx_bool(g))
+    return;
+  int strings = 3 + 4 + (version > 1 ? 3 : 0);
+  for (int i = 0; i < strings && !g->error; i++)
+    tmuf_gbx_string(g);
+  float f[3];
+  tmuf_gbx_u32(g);
+  tmuf_gbx_u32(g);
+  tmuf_gbx_u32(g);
+  read_floats(g, f, 3);
+}
+
+static const tmuf_gbx_chunk CARD_GENERIC_CHUNKS[] = {READ(0x030bd000, card_generic_chunk),
+                                                     READ(0x030bd001, card_generic_chunk),
+                                                     READ(0x030bd003, card_generic_chunk),
+                                                     READ(0x030bd004, card_generic_chunk)};
+static const tmuf_gbx_class CARD_GENERIC = {0x030bd000, "CGameControlCardGeneric", sizeof(tmuf_control),
+                                            CARD_GENERIC_CHUNKS, COUNT(CARD_GENERIC_CHUNKS), &GAME_CARD};
+
+/* CGameControlCardCtnChallengeInfo::Chunk (0x5d1ef0): 000 a number */
+static void card_number_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  UNUSED(id);
+  tmuf_gbx_u32(g);
+}
+
+static const tmuf_gbx_chunk CARD_CHALLENGE_CHUNKS[] = {READ(0x030bc000, card_number_chunk)};
+static const tmuf_gbx_class CARD_CHALLENGE = {0x030bc000, "CGameControlCardCtnChallengeInfo", sizeof(tmuf_control),
+                                              CARD_CHALLENGE_CHUNKS, COUNT(CARD_CHALLENGE_CHUNKS), &GAME_CARD};
+
+/* CGameControlCardLadderRanking::Chunk (0x74d3e0): 000 a bool, 001 two */
+static void card_bools_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  tmuf_gbx_bool(g);
+  if (id & 1u)
+    tmuf_gbx_bool(g);
+}
+
+static const tmuf_gbx_chunk CARD_LADDER_CHUNKS[] = {READ(0x030c1000, card_bools_chunk),
+                                                    READ(0x030c1001, card_bools_chunk)};
+static const tmuf_gbx_class CARD_LADDER = {0x030c1000, "CGameControlCardLadderRanking", sizeof(tmuf_control),
+                                           CARD_LADDER_CHUNKS, COUNT(CARD_LADDER_CHUNKS), &GAME_CARD};
+
+/* CTrackManiaControlCard::Chunk (0x452490): 000 a bool, 001 nothing; its
+   CTrackManiaControlMatchSettingsCard has no chunks of its own */
+static void tm_card_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  if (id == 0x2408f000u)
+    tmuf_gbx_bool(g);
+}
+
+static const tmuf_gbx_chunk TM_CARD_CHUNKS[] = {READ(0x2408f000, tm_card_chunk), READ(0x2408f001, tm_card_chunk)};
+static const tmuf_gbx_class TM_CARD = {0x2408f000, "CTrackManiaControlCard", sizeof(tmuf_control), TM_CARD_CHUNKS,
+                                       COUNT(TM_CARD_CHUNKS), &GAME_CARD};
+static const tmuf_gbx_class TM_MATCH_SETTINGS_CARD = {0x240c4000, "CTrackManiaControlMatchSettingsCard",
+                                                      sizeof(tmuf_control), NULL, 0, &TM_CARD};
+
+/* CControlLayout::Chunk (0x78d9e0): 000 two numbers, two reals; 001 two
+   numbers, four reals */
+static void layout_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  float f[4];
+  tmuf_gbx_u32(g);
+  tmuf_gbx_u32(g);
+  read_floats(g, f, id == 0x0700c001u ? 4 : 2);
+}
+
+static const tmuf_gbx_chunk CONTROL_LAYOUT_CHUNKS[] = {READ(0x0700c000, layout_chunk), READ(0x0700c001, layout_chunk)};
+static const tmuf_gbx_class CONTROL_LAYOUT = {0x0700c000, "CControlLayout", 1, CONTROL_LAYOUT_CHUNKS,
+                                              COUNT(CONTROL_LAYOUT_CHUNKS), NULL};
 
 /* CControlUiElement 0x07004000: a reference (its image) */
 static void c07004000(tmuf_gbx *g, void *node, uint32_t id) {
@@ -4238,6 +4591,398 @@ static const tmuf_gbx_class CONTROL_EFFECT_MASTER = {0x0701c000, "CControlEffect
                                                      CONTROL_EFFECT_MASTER_CHUNKS,
                                                      COUNT(CONTROL_EFFECT_MASTER_CHUNKS), NULL};
 
+/* CGameControlCardManager::Chunk (0x5c01d0): 000, 001 its data types (a
+   node list; 001's, ArchiveFastBufferNodRef, after a version) */
+static void card_manager_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  if (id == 0x0309b001u)
+    tmuf_gbx_u32(g);
+  tmuf_node_list l;
+  read_node_list(g, &l);
+}
+
+static const tmuf_gbx_chunk CARD_MANAGER_CHUNKS[] = {READ(0x0309b000, card_manager_chunk),
+                                                     READ(0x0309b001, card_manager_chunk)};
+static const tmuf_gbx_class CARD_MANAGER = {0x0309b000, "CGameControlCardManager", 1, CARD_MANAGER_CHUNKS,
+                                            COUNT(CARD_MANAGER_CHUNKS), NULL};
+
+/* CControlSlider::Chunk (0x78f7d0): 000 a reference, three reals; 001,
+   002 a number; 003 two ids; 004 a bool */
+static void slider_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  switch (id) {
+  case 0x0700b000u: {
+    float f[3];
+    tmuf_gbx_noderef(g);
+    read_floats(g, f, 3);
+    return;
+  }
+  case 0x0700b003u:
+    id_text(g);
+    id_text(g);
+    return;
+  case 0x0700b004u:
+    tmuf_gbx_bool(g);
+    return;
+  default: /* 001, 002 */
+    tmuf_gbx_u32(g);
+  }
+}
+
+static const tmuf_gbx_chunk CONTROL_SLIDER_CHUNKS[] = {
+    READ(0x0700b000, slider_chunk), READ(0x0700b001, slider_chunk), READ(0x0700b002, slider_chunk),
+    READ(0x0700b003, slider_chunk), READ(0x0700b004, slider_chunk)};
+static const tmuf_gbx_class CONTROL_SLIDER = {0x0700b000, "CControlSlider", sizeof(tmuf_control),
+                                              CONTROL_SLIDER_CHUNKS, COUNT(CONTROL_SLIDER_CHUNKS), &CONTROL_BASE};
+
+/* CGameControlDataType::Chunk (0x71c170): 000 a string, a reference; 001
+   a string, a mask, a reference */
+static void data_type_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  tmuf_gbx_string(g);
+  if (id == 0x0309c001u)
+    tmuf_gbx_u32(g);
+  tmuf_gbx_noderef(g);
+}
+
+static const tmuf_gbx_chunk DATA_TYPE_CHUNKS[] = {READ(0x0309c000, data_type_chunk), READ(0x0309c001, data_type_chunk)};
+static const tmuf_gbx_class DATA_TYPE = {0x0309c000, "CGameControlDataType", 1, DATA_TYPE_CHUNKS,
+                                         COUNT(DATA_TYPE_CHUNKS), NULL};
+
+/* CControlList::Chunk (0x77b020), the newer chunks: 006 three reals, a
+   number, a bool, a reference, a style sheet element; 008 that and two
+   reals; 009 that, two reals and a bool; 00a three reals, a number, a
+   bool, an element, two reals, a bool; 007 three numbers, five counts (one per
+   column array: texts, widths, styles, ids, flags), then per column a string, a real, a reference, an
+   id and a bool */
+static void list_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  if (id == 0x0700f007u) {
+    for (int i = 0; i < 3; i++)
+      tmuf_gbx_u32(g);
+    uint32_t n = tmuf_gbx_u32(g);
+    for (int i = 0; i < 4; i++)
+      tmuf_gbx_u32(g);
+    if (n > 256) {
+      tmuf_gbx_fail(g, "list column count %u", n);
+      return;
+    }
+    for (uint32_t i = 0; i < n && !g->error; i++) {
+      tmuf_gbx_string(g);
+      tmuf_gbx_f32(g);
+      tmuf_gbx_noderef(g);
+      id_text(g);
+      tmuf_gbx_bool(g);
+    }
+    return;
+  }
+  float f[3];
+  read_floats(g, f, 3);
+  tmuf_gbx_u32(g);
+  tmuf_gbx_bool(g);
+  if (id != 0x0700f00au)
+    tmuf_gbx_noderef(g);
+  style_sheet_elem(g, NULL);
+  if (id == 0x0700f00au) {
+    read_floats(g, f, 2);
+    tmuf_gbx_bool(g);
+    return;
+  }
+  if (id >= 0x0700f008u)
+    read_floats(g, f, 2);
+  if (id == 0x0700f009u)
+    tmuf_gbx_bool(g);
+}
+
+static const tmuf_gbx_chunk CONTROL_LIST_CHUNKS[] = {
+    READ(0x0700f006, list_chunk), READ(0x0700f007, list_chunk), READ(0x0700f008, list_chunk),
+    READ(0x0700f009, list_chunk), READ(0x0700f00a, list_chunk)};
+static const tmuf_gbx_class CONTROL_LIST = {0x0700f000, "CControlList", sizeof(tmuf_control), CONTROL_LIST_CHUNKS,
+                                            COUNT(CONTROL_LIST_CHUNKS), &CONTROL_FRAME};
+
+/* CControlUiRange::Chunk (0x777820): 000 an id */
+static void ui_range_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  UNUSED(id);
+  id_text(g);
+}
+
+static const tmuf_gbx_chunk UI_RANGE_CHUNKS[] = {READ(0x07014000, ui_range_chunk)};
+static const tmuf_gbx_class UI_RANGE = {0x07014000, "CControlUiRange", sizeof(tmuf_control), UI_RANGE_CHUNKS,
+                                        COUNT(UI_RANGE_CHUNKS), &CONTROL_BASE};
+
+/* CControlEffectSimi::Chunk (0x78ce50): its keys
+   (CFastBufferKey::Archive 0x78cd30: a count, per key a time and its
+   value, SKeyVal::Archive 0x78c3c0: a GmSimi2 (five reals), then by
+   version 0 none, 1 one, 2 two, 3 six reals) and a bool; 000-002 keys of
+   version 0-2; 003 version 3 keys, then a number; 004 that and a bool;
+   005 that and another bool */
+static void effect_simi_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  static const int EXTRA[4] = {0, 1, 2, 6};
+  const uint32_t version = id >= 0x07010003u ? 3 : id - 0x07010000u;
+  uint32_t n = tmuf_gbx_u32(g);
+  if (n > 4096) {
+    tmuf_gbx_fail(g, "simi key count %u", n);
+    return;
+  }
+  float f[12];
+  for (uint32_t i = 0; i < n && !g->error; i++)
+    read_floats(g, f, 1 + 5 + EXTRA[version]);
+  tmuf_gbx_bool(g);
+  if (id < 0x07010003u)
+    return;
+  tmuf_gbx_u32(g);
+  if (id >= 0x07010004u)
+    tmuf_gbx_bool(g);
+  if (id == 0x07010005u)
+    tmuf_gbx_bool(g);
+}
+
+static const tmuf_gbx_chunk EFFECT_SIMI_CHUNKS[] = {
+    NOPAY(0x07005000), READ(0x07010000, effect_simi_chunk), READ(0x07010001, effect_simi_chunk),
+    READ(0x07010002, effect_simi_chunk), READ(0x07010003, effect_simi_chunk), READ(0x07010004, effect_simi_chunk),
+    READ(0x07010005, effect_simi_chunk)};
+static const tmuf_gbx_class EFFECT_SIMI = {0x07010000, "CControlEffectSimi", 1, EFFECT_SIMI_CHUNKS,
+                                           COUNT(EFFECT_SIMI_CHUNKS), NULL};
+
+/* CControlColorChooser::Chunk (0x7849c0): 000 a real, 001 a reference,
+   002 two reals, 003 a number */
+static void color_chooser_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  switch (id) {
+  case 0x0701e001u:
+    tmuf_gbx_noderef(g);
+    return;
+  case 0x0701e002u:
+    tmuf_gbx_f32(g);
+    tmuf_gbx_f32(g);
+    return;
+  case 0x0701e003u:
+    tmuf_gbx_u32(g);
+    return;
+  default:
+    tmuf_gbx_f32(g);
+  }
+}
+
+static const tmuf_gbx_chunk COLOR_CHOOSER_CHUNKS[] = {
+    READ(0x0701e000, color_chooser_chunk), READ(0x0701e001, color_chooser_chunk),
+    READ(0x0701e002, color_chooser_chunk), READ(0x0701e003, color_chooser_chunk)};
+static const tmuf_gbx_class COLOR_CHOOSER = {0x0701e000, "CControlColorChooser", sizeof(tmuf_control),
+                                             COLOR_CHOOSER_CHUNKS, COUNT(COLOR_CHOOSER_CHUNKS), &CONTROL_FRAME};
+
+/* ---- what the menus' 3D scenes hold ---- */
+
+/* CMotionEmitterParticles::Chunk (0x5695d0): 001 a reference, two bools,
+   SEmitParams::Archive2 (0x562930: a version; version 1 a GmMat3 and
+   thirteen reals); 002 that and a bool */
+static void emitter_particles_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  tmuf_gbx_noderef(g);
+  tmuf_gbx_bool(g);
+  tmuf_gbx_bool(g);
+  if (tmuf_gbx_u32(g) == 1) {
+    float f[22];
+    read_floats(g, f, 22);
+  }
+  if (id == 0x08058002u)
+    tmuf_gbx_bool(g);
+}
+
+static const tmuf_gbx_chunk EMITTER_PARTICLES_CHUNKS[] = {READ(0x08058001, emitter_particles_chunk),
+                                                          READ(0x08058002, emitter_particles_chunk)};
+static const tmuf_gbx_class EMITTER_PARTICLES = {0x08058000, "CMotionEmitterParticles", 1, EMITTER_PARTICLES_CHUNKS,
+                                                 COUNT(EMITTER_PARTICLES_CHUNKS), &MOTION};
+
+/* CPlugVisual2D::Chunk (0x8bf190): 000 a count, then 32 bytes per vertex;
+   CPlugVisualQuads2D adds none */
+static void visual_2d_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  UNUSED(id);
+  uint32_t n = tmuf_gbx_u32(g);
+  if (n > 0x100000u) {
+    tmuf_gbx_fail(g, "2D vertex count %u", n);
+    return;
+  }
+  tmuf_gbx_skip(g, (size_t)n * 32u);
+}
+
+static const tmuf_gbx_chunk VISUAL_2D_CHUNKS[] = {READ(0x0904a000, visual_2d_chunk)};
+static const tmuf_gbx_class VISUAL_2D = {0x0904a000, "CPlugVisual2D", sizeof(tmuf_plug_visual), VISUAL_2D_CHUNKS,
+                                         COUNT(VISUAL_2D_CHUNKS), &VISUAL};
+static const tmuf_gbx_class VISUAL_QUADS_2D = {0x0904b000, "CPlugVisualQuads2D", sizeof(tmuf_plug_visual), NULL, 0,
+                                               &VISUAL_2D};
+
+/* CControlEnum::Chunk (0x7742c0), the newer chunks: 006 a bool, a number;
+   007 a bool, two numbers, a reference; 008 a bool, three numbers, a
+   reference; 009 that and a real; 00a a counted list of ids */
+static void enum_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  if (id == 0x0700a00au) {
+    uint32_t n = tmuf_gbx_u32(g);
+    if (n > 4096) {
+      tmuf_gbx_fail(g, "enum id count %u", n);
+      return;
+    }
+    for (uint32_t i = 0; i < n && !g->error; i++)
+      id_text(g);
+    return;
+  }
+  tmuf_gbx_bool(g);
+  tmuf_gbx_u32(g);
+  if (id == 0x0700a006u)
+    return;
+  if (id >= 0x0700a008u)
+    tmuf_gbx_u32(g);
+  tmuf_gbx_u32(g);
+  tmuf_gbx_noderef(g);
+  if (id == 0x0700a009u)
+    tmuf_gbx_f32(g);
+}
+
+static const tmuf_gbx_chunk CONTROL_ENUM_CHUNKS[] = {
+    READ(0x0700a006, enum_chunk), READ(0x0700a007, enum_chunk), READ(0x0700a008, enum_chunk),
+    READ(0x0700a009, enum_chunk), READ(0x0700a00a, enum_chunk)};
+static const tmuf_gbx_class CONTROL_ENUM = {0x0700a000, "CControlEnum", sizeof(tmuf_control), CONTROL_ENUM_CHUNKS,
+                                            COUNT(CONTROL_ENUM_CHUNKS), &CONTROL_TEXT};
+
+/* ---- the menus: CGameMenu (0x03009000) and CGameMenuFrame (0x0300b000) ----
+
+   A menu file holds the frames of a set of dialogs (CGameMenu::Chunk, the
+   exe's 0x657430); each frame is a CControlFrame with a menu frame's own
+   chunks (CGameMenuFrame::Chunk, 0x72fab0): its sounds, its scene and its
+   scripts. */
+
+/* GmFrustum::ArchiveFrustum: a flag, then six reals (as GxLightFrustum's) */
+static void gm_frustum(tmuf_gbx *g) {
+  float f[6];
+  tmuf_gbx_u32(g);
+  read_floats(g, f, 6);
+}
+
+static void menu_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  tmuf_game_menu *m = node;
+  switch (id) {
+  case 0x03009000u:
+  case 0x03009001u: {
+    tmuf_node_list l;
+    read_node_list(g, &l);
+    tmuf_gbx_noderef(g);
+    tmuf_gbx_bool(g);
+    tmuf_gbx_noderef(g);
+    if (id == 0x03009001u)
+      tmuf_gbx_u32(g);
+    return;
+  }
+  case 0x03009002u:
+  case 0x03009007u:
+    tmuf_gbx_noderef(g);
+    return;
+  case 0x03009003u: {
+    uint32_t n = tmuf_gbx_u32(g);
+    if (n > 4096) {
+      tmuf_gbx_fail(g, "menu frame count %u", n);
+      return;
+    }
+    m->frames = TMUF_ARENA_ARRAY(g->arena, tmuf_control_child, n ? n : 1);
+    m->frame_count = n;
+    for (uint32_t i = 0; i < n && !g->error; i++) {
+      m->frames[i].iso[0] = m->frames[i].iso[4] = m->frames[i].iso[8] = 1.0f; /* not placed */
+      m->frames[i].control = control_instance(g, &m->frames[i]);
+    }
+    m->main_frame = tmuf_gbx_u32(g);
+    /* a second number, -1 in every menu file; the decompiled 003 shows
+       one DoNat16 here (UNVERIFIED which field it is) */
+    tmuf_gbx_u32(g);
+    return;
+  }
+  case 0x03009004u:
+    tmuf_gbx_noderef(g);
+    tmuf_gbx_f32(g);
+    return;
+  case 0x03009005u:
+    gm_frustum(g);
+    return;
+  case 0x03009006u: {
+    float f[12];
+    tmuf_gbx_noderef(g);
+    read_floats(g, f, 3);
+    tmuf_gbx_bool(g);
+    for (uint32_t i = 0; i < m->frame_count && !g->error; i++) {
+      read_floats(g, f, 12);
+      read_floats(g, f, 12);
+      tmuf_gbx_bool(g);
+    }
+    return;
+  }
+  case 0x03009008u: /* two reals (the exe's 0x737220) */
+    tmuf_gbx_f32(g);
+    tmuf_gbx_f32(g);
+    return;
+  case 0x03009009u:
+    if (tmuf_gbx_u32(g) == 0) {
+      gm_frustum(g);
+      tmuf_gbx_u32(g);
+    }
+    return;
+  default: /* 00a, 00b */
+    tmuf_gbx_noderef(g);
+    tmuf_gbx_noderef(g);
+    tmuf_gbx_f32(g);
+    if (id == 0x0300900bu) {
+      tmuf_gbx_f32(g);
+      tmuf_gbx_f32(g);
+    }
+  }
+}
+
+static const tmuf_gbx_chunk MENU_CHUNKS[] = {
+    READ(0x03009000, menu_chunk), READ(0x03009001, menu_chunk), READ(0x03009002, menu_chunk),
+    READ(0x03009003, menu_chunk), READ(0x03009004, menu_chunk), READ(0x03009005, menu_chunk),
+    READ(0x03009006, menu_chunk), READ(0x03009007, menu_chunk), READ(0x03009008, menu_chunk),
+    READ(0x03009009, menu_chunk), READ(0x0300900a, menu_chunk), READ(0x0300900b, menu_chunk)};
+static const tmuf_gbx_class GAME_MENU = {0x03009000, "CGameMenu", sizeof(tmuf_game_menu), MENU_CHUNKS,
+                                         COUNT(MENU_CHUNKS), NULL};
+
+/* CGameMenuFrame::Chunk: 000-004 references (its up/down and show sounds,
+   from 001 its scene, from 002 its scripts) and two pairs of reals (the
+   exe's 0x737220 archives two reals); 005 three references and four
+   reals; 006 an id; 007 two reals; 008 a bool */
+static void menu_frame_chunk(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  if (id == 0x0300b006u) {
+    id_text(g);
+    return;
+  }
+  if (id == 0x0300b007u) {
+    tmuf_gbx_f32(g);
+    tmuf_gbx_f32(g);
+    return;
+  }
+  if (id == 0x0300b008u) {
+    tmuf_gbx_bool(g);
+    return;
+  }
+  int refs = id == 0x0300b005u ? 3 : (int)(id - 0x0300b000u) + 2;
+  for (int i = 0; i < refs && !g->error; i++)
+    tmuf_gbx_noderef(g);
+  if (id == 0x0300b005u) {
+    float f[4];
+    read_floats(g, f, 4);
+    return;
+  }
+  float f[4];
+  read_floats(g, f, 4);
+}
+
+static const tmuf_gbx_chunk MENU_FRAME_CHUNKS[] = {
+    READ(0x0300b000, menu_frame_chunk), READ(0x0300b001, menu_frame_chunk), READ(0x0300b002, menu_frame_chunk),
+    READ(0x0300b003, menu_frame_chunk), READ(0x0300b004, menu_frame_chunk), READ(0x0300b005, menu_frame_chunk),
+    READ(0x0300b006, menu_frame_chunk), READ(0x0300b007, menu_frame_chunk), READ(0x0300b008, menu_frame_chunk)};
+static const tmuf_gbx_class GAME_MENU_FRAME = {0x0300b000, "CGameMenuFrame", sizeof(tmuf_control),
+                                               MENU_FRAME_CHUNKS, COUNT(MENU_FRAME_CHUNKS), &CONTROL_FRAME};
+
 /* ---- CFuncEnum (0x0500e000): a value per state (a button's icons, a
    style's materials) ---- */
 
@@ -4421,5 +5166,10 @@ const tmuf_gbx_class *const tmuf_pack_classes[] = {
     &FONT_BITMAP,
     &CONTROL_BASE, &CONTROL_CONTAINER, &CONTROL_FRAME, &CONTROL_UI_ELEMENT, &CONTROL_TEXT, &CONTROL_LABEL,
     &CONTROL_BUTTON, &CONTROL_ENTRY, &CONTROL_QUAD, &CONTROL_EFFECT_MASTER, &CONTROL_STYLE, &FUNC_ENUM, &ICON_INDEX,
+    &GAME_MENU, &GAME_MENU_FRAME, &CONTROL_GRID, &CONTROL_PAGER, &GAME_CARD,
+    &CARD_GENERIC, &CARD_CHALLENGE, &CONTROL_LAYOUT,
+    &GAME_GRID, &GRID_CAMPAIGN, &GRID_GROUP,
+    &GRID_CARD, &CONTROL_ENUM, &CARD_MANAGER, &CONTROL_SLIDER, &DATA_TYPE, &CONTROL_LIST, &UI_RANGE, &CARD_LADDER, &TM_CARD, &TM_MATCH_SETTINGS_CARD, &EFFECT_SIMI,
+    &EMITTER_PARTICLES, &VISUAL_2D, &VISUAL_QUADS_2D, &COLOR_CHOOSER,
 };
 const size_t tmuf_pack_class_count = COUNT(tmuf_pack_classes);
