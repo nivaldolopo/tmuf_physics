@@ -1,6 +1,7 @@
 #include "common/sounds.h"
 #include "common/api_common.h"
 
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -174,7 +175,7 @@ static void frame_add(tmuf_frame *f, const tmuf_gbx_node *n, int parent, const f
   out->class_id = n->class_id;
   out->class_name = n->cls ? n->cls->name : "";
   out->name = instance_name ? instance_name : "";
-  out->file = out->text = out->style = out->font = out->image = "";
+  out->file = out->text = out->style = out->font = out->image = out->substyle = "";
   if (iso)
     memcpy(out->iso, iso, sizeof out->iso);
   else
@@ -196,6 +197,7 @@ static void frame_add(tmuf_frame *f, const tmuf_gbx_node *n, int parent, const f
   out->flags = c->flags;
   out->text = c->text ? c->text : "";
   out->image = node_file(c->image);
+  out->substyle = c->quad_id ? c->quad_id : "";
   const tmuf_control_style *st = NULL;
   if (c->style && c->style->external)
     out->style = node_file(c->style);
@@ -207,6 +209,8 @@ static void frame_add(tmuf_frame *f, const tmuf_gbx_node *n, int parent, const f
     out->style = node_file(c->style_sheet);
   if (c->has_own_style)
     st = &c->own_style;
+  if (!out->substyle[0] && st && st->icon)
+    out->substyle = st->icon;
   if (st) {
     out->font = node_file(st->font);
     memcpy(out->text_size, st->text_size, sizeof out->text_size);
@@ -380,6 +384,197 @@ int tmuf_control_style_load(const tmuf_packs *packs, const char *path, tmuf_cont
   const int ok = read_control_style(&ps.base, 1, pack->files[ref.file].uncompressed_size, path, out, err, err_size);
   tmuf_pack_stream_close(&ps);
   return ok;
+}
+
+/* A file parsed whole from the packs or, when they don't have it, from
+   GameData (plain), its nodes kept in arena until parsed_free */
+typedef struct parsed_file {
+  tmuf_arena arena;
+  tmuf_gbx g;
+  uint8_t *data; /* a GameData file's bytes */
+  char dir[260]; /* its folder, ending in '\\' (for its references) */
+  const void *root;
+} parsed_file;
+
+static void parsed_free(parsed_file *p) {
+  tmuf_arena_free(&p->arena);
+  free(p->data);
+}
+
+static int parse_path(const tmuf_packs *packs, const char *path, parsed_file *p, char *err, size_t err_size) {
+  memset(p, 0, sizeof *p);
+  tmuf_arena_init(&p->arena);
+  snprintf(p->dir, sizeof p->dir, "%s", path);
+  char *slash = strrchr(p->dir, '\\');
+  if (slash)
+    slash[1] = 0;
+  else
+    p->dir[0] = 0;
+  uint64_t size = 0;
+  const tmuf_pack_ref ref = tmuf_packset_find(&packs->set, path);
+  tmuf_pack_stream ps;
+  tmuf_mem_source ms;
+  int stream = 0;
+  if (ref.pack >= 0) {
+    if (!tmuf_pack_stream_open(&ps, &packs->set.packs[ref.pack], ref.file)) {
+      tmuf_set_error(err, err_size, "%s: cannot open", path);
+      return 0;
+    }
+    stream = 1;
+    size = packs->set.packs[ref.pack].files[ref.file].uncompressed_size;
+    tmuf_gbx_init(&p->g, &ps.base, &p->arena, tmuf_pack_classes, tmuf_pack_class_count);
+    p->g.feedback = 1;
+  } else {
+    char disk[1200];
+    FILE *f = tmuf_packset_find_file(&packs->set, path, disk, sizeof disk) ? fopen(disk, "rb") : NULL;
+    long n = -1;
+    if (f && fseek(f, 0, SEEK_END) == 0 && (n = ftell(f)) > 0 && fseek(f, 0, SEEK_SET) == 0 &&
+        (p->data = malloc((size_t)n)) != NULL && fread(p->data, 1, (size_t)n, f) != (size_t)n)
+      n = -1;
+    if (f)
+      fclose(f);
+    if (!p->data || n <= 0) {
+      tmuf_set_error(err, err_size, "%s: not in the packs or GameData", path);
+      return 0;
+    }
+    size = (uint64_t)n;
+    tmuf_mem_source_init(&ms, p->data, (size_t)n);
+    tmuf_gbx_init(&p->g, &ms.base, &p->arena, tmuf_pack_classes, tmuf_pack_class_count);
+  }
+  p->root = tmuf_gbx_read_header(&p->g) ? tmuf_gbx_read_root(&p->g) : NULL;
+  if (stream)
+    tmuf_pack_stream_close(&ps);
+  if (!p->root || p->g.error || p->g.pos != size) {
+    tmuf_set_error(err, err_size, "%s: %s after %llu of %llu bytes", path, p->g.error ? p->g.message : "parse ended",
+                   (unsigned long long)p->g.pos, (unsigned long long)size);
+    return 0;
+  }
+  return 1;
+}
+
+static int ends_with(const char *s, const char *tail) {
+  const size_t n = strlen(s), t = strlen(tail);
+  if (n < t)
+    return 0;
+  for (size_t i = 0; i < t; i++)
+    if (tolower((unsigned char)s[n - t + i]) != tolower((unsigned char)tail[i]))
+      return 0;
+  return 1;
+}
+
+/* The plain path of p's first external reference whose name ends in tail */
+static int external_ending(const parsed_file *p, const char *tail, char *out, size_t out_size) {
+  for (uint32_t i = 1; i <= p->g.node_count; i++) {
+    const tmuf_gbx_node *n = &p->g.nodes[i];
+    if (n->external && n->file && ends_with(n->file, tail))
+      return tmuf_gbx_external_path(&p->g, n, p->dir, out, out_size);
+  }
+  return 0;
+}
+
+/* The first picture a material's files name, a few files deep */
+static int find_picture(const tmuf_packs *packs, const char *path, int depth, char *out, size_t out_size) {
+  if (depth > 4)
+    return 0;
+  parsed_file p;
+  char err[8];
+  int found = 0;
+  if (parse_path(packs, path, &p, err, sizeof err) || p.g.node_count) {
+    for (uint32_t i = 1; i <= p.g.node_count && !found; i++) {
+      const tmuf_gbx_node *n = &p.g.nodes[i];
+      char next[260];
+      if (!n->external || !n->file || !tmuf_gbx_external_path(&p.g, n, p.dir, next, sizeof next))
+        continue;
+      if (ends_with(n->file, ".dds") || ends_with(n->file, ".tga")) {
+        snprintf(out, out_size, "%s", next);
+        found = 1;
+      } else if (ends_with(n->file, ".Gbx")) {
+        found = find_picture(packs, next, depth + 1, out, out_size);
+      }
+    }
+  }
+  parsed_free(&p);
+  return found;
+}
+
+int tmuf_control_style_art_load(const tmuf_packs *packs, const char *path, tmuf_control_style_art *out, char *err,
+                                size_t err_size) {
+  if (out)
+    memset(out, 0, sizeof *out);
+  if (!packs || !path || !out) {
+    tmuf_set_error(err, err_size, "no packs, path or output");
+    return 0;
+  }
+  parsed_file p;
+  if (!parse_path(packs, path, &p, err, err_size)) {
+    parsed_free(&p);
+    return 0;
+  }
+  if (p.g.class_id != 0x07017000u) {
+    tmuf_set_error(err, err_size, "%s: not a control style", path);
+    parsed_free(&p);
+    return 0;
+  }
+  const tmuf_control_style *st = p.root;
+  snprintf(out->icon, sizeof out->icon, "%s", st->icon ? st->icon : "");
+  /* the enum is its own file (Bgs1) or inside the style (BgRaceScore2) */
+  const int own = !external_ending(&p, ".FuncEnum.Gbx", out->func_enum, sizeof out->func_enum);
+  if (own)
+    snprintf(out->func_enum, sizeof out->func_enum, "%s", path);
+  parsed_free(&p);
+  if (!parse_path(packs, out->func_enum, &p, err, err_size)) {
+    parsed_free(&p);
+    return 0;
+  }
+  const tmuf_func_enum *e = p.g.class_id == 0x0500e000u ? p.root : NULL;
+  for (uint32_t i = 1; i <= p.g.node_count && !e; i++)
+    if (!p.g.nodes[i].external && p.g.nodes[i].data && p.g.nodes[i].class_id == 0x0500e000u)
+      e = p.g.nodes[i].data;
+  char icons[260] = "";
+  if (!e || !(external_ending(&p, ".Material.Gbx", out->material, sizeof out->material) ||
+              external_ending(&p, ".Texture.Gbx", out->material, sizeof out->material))) {
+    tmuf_set_error(err, err_size, "%s: no CFuncEnum with a material", out->func_enum);
+    parsed_free(&p);
+    return 0;
+  }
+  out->columns = e->columns;
+  out->rows = e->rows;
+  memcpy(out->uv_min, e->uv_min, sizeof out->uv_min);
+  memcpy(out->uv_max, e->uv_max, sizeof out->uv_max);
+  memcpy(out->size, e->size, sizeof out->size);
+  external_ending(&p, ".RefBuffer.Gbx", icons, sizeof icons);
+  /* the icons: inline in the enum's file (BgsPlayerCard), or in a
+     RefBuffer file of their own (Bgs1IconIndexs) */
+  for (int pass = 0; pass < 2; pass++) {
+    if (pass == 1) {
+      parsed_free(&p);
+      if (!icons[0])
+        break;
+      if (!parse_path(packs, icons, &p, err, err_size)) {
+        parsed_free(&p);
+        return 0;
+      }
+    }
+    for (uint32_t i = 1; i <= p.g.node_count && out->icon_count < 256; i++) {
+      const tmuf_gbx_node *n = &p.g.nodes[i];
+      if (n->external || !n->data || n->class_id != 0x0702b000u)
+        continue;
+      const tmuf_icon_index *ix = n->data;
+      tmuf_style_icon *o = &out->icons[out->icon_count++];
+      snprintf(o->name, sizeof o->name, "%s", ix->name ? ix->name : "");
+      memcpy(o->numbers, ix->numbers, sizeof o->numbers);
+      o->index = ix->index;
+      o->extra = ix->extra;
+      memcpy(o->reals, ix->reals, sizeof o->reals);
+    }
+    if (pass == 1)
+      parsed_free(&p);
+  }
+  if (!find_picture(packs, out->material, 0, out->picture, sizeof out->picture)) {
+    tmuf_set_error(err, err_size, "%s: no picture", out->material);
+    return 0;
+  }
+  return 1;
 }
 
 /* ---- replays ---- */

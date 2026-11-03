@@ -703,6 +703,8 @@ static int cmd_frame(const char *packs_dir, const char *path, int menu) {
       printf(" font=%s size %g %g", c[i].font, c[i].text_size[0], c[i].text_size[1]);
     if (c[i].has_color)
       printf(" color %g %g %g %g", c[i].color[0], c[i].color[1], c[i].color[2], c[i].color[3]);
+    if (c[i].substyle[0])
+      printf(" substyle=%s", c[i].substyle);
     if (c[i].image[0])
       printf(" image=%s", c[i].image);
     printf("\n");
@@ -710,6 +712,56 @@ static int cmd_frame(const char *packs_dir, const char *path, int menu) {
   printf("%zu controls\n", n);
   tmuf_frame_free(f);
   tmuf_packs_close(packs);
+  return 0;
+}
+
+/* Writes a pack file's plain bytes as the parser reads them (for files
+   whose decryption takes the parser's feedback, e.g. the menus). */
+static int cmd_parsed(const char *packs_dir, const char *path, const char *out) {
+  char err[512] = "";
+  tmuf_packs *packs = tmuf_packs_open(packs_dir, err, sizeof err);
+  if (!packs) {
+    fprintf(stderr, "%s\n", err);
+    return 1;
+  }
+  size_t size = 0;
+  void *data = tmuf_packs_read_parsed(packs, path, &size);
+  tmuf_packs_close(packs);
+  FILE *f = data ? fopen(out, "wb") : NULL;
+  const int ok = f && fwrite(data, 1, size, f) == size;
+  if (f)
+    fclose(f);
+  tmuf_free(data);
+  if (!ok)
+    fprintf(stderr, "%s: cannot read or write\n", path);
+  return !ok;
+}
+
+/* Prints a picture style's art: its picture and icon list. */
+static int cmd_style(const char *packs_dir, const char *path) {
+  char err[512] = "";
+  tmuf_packs *packs = tmuf_packs_open(packs_dir, err, sizeof err);
+  if (!packs) {
+    fprintf(stderr, "%s\n", err);
+    return 1;
+  }
+  static tmuf_control_style_art art;
+  const int ok = tmuf_control_style_art_load(packs, path, &art, err, sizeof err);
+  tmuf_packs_close(packs);
+  if (!ok) {
+    fprintf(stderr, "%s\n", err);
+    return 1;
+  }
+  printf("enum %s\nmaterial %s\npicture %s\nown icon %s\ncells %u x %u, uv (%g %g) to (%g %g), size %g x %g\n"
+         "%u icons\n",
+         art.func_enum, art.material, art.picture, art.icon, art.columns, art.rows, art.uv_min[0], art.uv_min[1],
+         art.uv_max[0], art.uv_max[1], art.size[0], art.size[1], art.icon_count);
+  for (uint32_t i = 0; i < art.icon_count; i++) {
+    const tmuf_style_icon *ic = &art.icons[i];
+    printf("  %-28s %u %u %u %u %u %u  index %u extra %u reals %g %g\n", ic->name, ic->numbers[0], ic->numbers[1],
+           ic->numbers[2], ic->numbers[3], ic->numbers[4], ic->numbers[5], ic->index, ic->extra, ic->reals[0],
+           ic->reals[1]);
+  }
   return 0;
 }
 
@@ -811,6 +863,10 @@ int main(int argc, char **argv) {
     return cmd_frame(argv[2], argv[3], 0);
   if (argc >= 4 && strcmp(argv[1], "menu") == 0)
     return cmd_frame(argv[2], argv[3], 1);
+  if (argc >= 5 && strcmp(argv[1], "parsed") == 0)
+    return cmd_parsed(argv[2], argv[3], argv[4]);
+  if (argc >= 4 && strcmp(argv[1], "style") == 0)
+    return cmd_style(argv[2], argv[3]);
   if (argc >= 5 && strcmp(argv[1], "catp") == 0)
     return cmd_catp(argv[2], argv[3], argv[4]);
   if (argc >= 4 && strcmp(argv[1], "vehicle") == 0)

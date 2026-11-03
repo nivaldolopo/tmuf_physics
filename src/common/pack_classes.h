@@ -790,6 +790,10 @@ typedef struct tmuf_icon_index {
 typedef struct tmuf_func_enum {
   tmuf_node_list values;
   const char *name;
+  uint32_t columns, rows; /* 004/005: the picture's cells (+0x24, +0x28) */
+  float uv_min[2];        /* 005: the cells' corner in the picture (+0x2c) */
+  float uv_max[2];        /* 005: the opposite corner (+0x34) */
+  float size[2];          /* 007: the picture's size in texels (+0x3c) */
 } tmuf_func_enum;
 
 /* CControlStyle (0x07017000): the text style a control draws with (an
@@ -800,7 +804,9 @@ typedef struct tmuf_control_style {
   float text_size[2];  /* the two reals after the font */
   int has_color;
   float color[4];      /* the text colour, r g b a */
-  const char *name;    /* 0x0701700c / 01e: its id */
+  const char *name;    /* 0x0701700c: its id (+0x14) */
+  const char *icon;    /* 0x0701701e: the icon a quad of this style shows
+                          when it names none (+0xc4, CControlQuad::Draw) */
 } tmuf_control_style;
 
 /* A child of a CControlFrame: the control, and where the frame puts it

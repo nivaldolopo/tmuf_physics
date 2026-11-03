@@ -121,6 +121,10 @@ typedef struct tmuf_frame_control {
   int has_color;
   float color[4];        /* the style's text colour, r g b a */
   const char *image;     /* an image reference's file name */
+  const char *substyle;  /* a quad's icon in its style's icon list: its
+                            own (CControlQuad 0x0701b006) or its inline
+                            style's (0x0701701e), e.g. "BgTitle3_1"; ""
+                            when the style's own icon applies */
 } tmuf_frame_control;
 
 typedef struct tmuf_frame tmuf_frame;
@@ -158,6 +162,41 @@ typedef struct tmuf_control_style_info {
    style, or doesn't parse to its end. */
 TMUF_API int tmuf_control_style_load(const tmuf_packs *packs, const char *path, tmuf_control_style_info *out,
                                      char *err, size_t err_size);
+
+/* One CControlIconIndex (0x0702b000) of a style's icon list: a named cell
+   of the style's picture. The numbers are as archived (chunk 000: the
+   object's +0x18, +0x20, +0x28, +0x1c, +0x24, +0x2c; 001 adds +0x30, 002
+   +0x34 and two reals +0x38, +0x3c). */
+typedef struct tmuf_style_icon {
+  char name[64];
+  uint32_t numbers[6];
+  uint32_t index;
+  uint32_t extra;
+  float reals[2];
+} tmuf_style_icon;
+
+/* What a picture style draws (e.g. Bgs1.ControlStyle.Gbx): its
+   CFuncEnum's material's picture, and the icons of its icon list. */
+typedef struct tmuf_control_style_art {
+  char func_enum[260]; /* the CFuncEnum's plain path */
+  char material[260];  /* the material's plain path */
+  char picture[260];   /* the first picture (.dds / .tga) the material's
+                          files name, as a plain path */
+  char icon[64];       /* the style's own icon, for quads that name none */
+  uint32_t columns, rows; /* the enum's cells across and down the picture */
+  float uv_min[2], uv_max[2]; /* where the cells lie in the picture */
+  float size[2];       /* the picture's size in texels, as the enum says
+                          (0 when it doesn't) */
+  uint32_t icon_count;
+  tmuf_style_icon icons[256];
+} tmuf_control_style_art;
+
+/* Reads a picture style: the style file (packs or GameData), its
+   .FuncEnum.Gbx, that enum's .Material.Gbx (followed through its files to
+   a picture) and its .RefBuffer.Gbx of CControlIconIndex. Returns 1 and
+   fills *out, or 0 with a message in err (a text style has no enum). */
+TMUF_API int tmuf_control_style_art_load(const tmuf_packs *packs, const char *path, tmuf_control_style_art *out,
+                                         char *err, size_t err_size);
 
 /* ---- tracks: everything about a map that does not change while driving ---- */
 

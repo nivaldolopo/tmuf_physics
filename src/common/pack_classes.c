@@ -5010,17 +5010,19 @@ static void func_enum_chunk(tmuf_gbx *g, void *node, uint32_t id) {
     tmuf_gbx_noderef(g);
     return;
   case 0x0500e007u:
-    tmuf_gbx_skip(g, 8);
+    read_floats(g, e->size, 2);
     return;
   default: /* 004, 005 */
     tmuf_gbx_u32(g);
     read_node_list(g, &e->values);
     e->name = id_text(g);
-    tmuf_gbx_u32(g);
-    tmuf_gbx_u32(g);
+    e->columns = tmuf_gbx_u32(g);
+    e->rows = tmuf_gbx_u32(g);
     skip_counted(g, 4);
-    if (id == 0x0500e005u)
-      tmuf_gbx_skip(g, 16);
+    if (id == 0x0500e005u) {
+      read_floats(g, e->uv_min, 2);
+      read_floats(g, e->uv_max, 2);
+    }
   }
 }
 
@@ -5108,6 +5110,12 @@ static void read_layout(tmuf_gbx *g, const char *l, tmuf_control_style *st) {
       else
         tmuf_gbx_id(g, NULL);
       break;
+    case 'I':
+      if (st)
+        st->icon = id_text(g);
+      else
+        tmuf_gbx_id(g, NULL);
+      break;
     case 'T': {
       tmuf_gbx_u32(g);
       tmuf_gbx_u32(g);
@@ -5132,7 +5140,7 @@ static const char *const STYLE_LAYOUTS[] = {
     "i",            "rrnff",        "rffr",        "brrrffffr",     "rrnffnr",      "ffrrrrc",
     "bffcc",        "sss",          "bbffccc",     "bbffccvv",      "r",            "bbffccvvf",
     "cc",           "nFSnCsOO",     "brrrrffffrf", "FSTTT",         "ffffrrr",      "brrrrffffrf",
-    "i",
+    "I",
 };
 
 static void style_chunk(tmuf_gbx *g, void *node, uint32_t id) {
