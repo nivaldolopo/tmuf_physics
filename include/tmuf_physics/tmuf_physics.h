@@ -151,7 +151,9 @@ typedef struct tmuf_control_style_info {
   float color[4];      /* the text colour, r g b a */
 } tmuf_control_style_info;
 
-/* Reads a style file from the packs through the GBX parser. Returns 1 and
+/* Reads a style file from the packs through the GBX parser, or, when the
+   packs don't have it, the plain file of that path under the installation's
+   GameData (where the game ships some, e.g. TextTitle3). Returns 1 and
    fills *out, or 0 with a message in err when it is missing, is not a
    style, or doesn't parse to its end. */
 TMUF_API int tmuf_control_style_load(const tmuf_packs *packs, const char *path, tmuf_control_style_info *out,

@@ -308,33 +308,15 @@ void tmuf_frame_free(tmuf_frame *f) {
   free(f);
 }
 
-int tmuf_control_style_load(const tmuf_packs *packs, const char *path, tmuf_control_style_info *out, char *err,
-                            size_t err_size) {
-  if (out)
-    memset(out, 0, sizeof *out);
-  if (!packs || !path || !out) {
-    tmuf_set_error(err, err_size, "no packs, path or output");
-    return 0;
-  }
-  const tmuf_pack_ref ref = tmuf_packset_find(&packs->set, path);
-  if (ref.pack < 0) {
-    tmuf_set_error(err, err_size, "%s: not in the packs", path);
-    return 0;
-  }
-  const tmuf_pack *pack = &packs->set.packs[ref.pack];
-  tmuf_pack_stream ps;
-  if (!tmuf_pack_stream_open(&ps, pack, ref.file)) {
-    tmuf_set_error(err, err_size, "%s: cannot open", path);
-    return 0;
-  }
+/* The style's root read from src (size bytes) into out. */
+static int read_control_style(tmuf_source *src, int feedback, uint64_t size, const char *path,
+                              tmuf_control_style_info *out, char *err, size_t err_size) {
   tmuf_arena arena;
   tmuf_arena_init(&arena);
   tmuf_gbx g;
-  tmuf_gbx_init(&g, &ps.base, &arena, tmuf_pack_classes, tmuf_pack_class_count);
-  g.feedback = 1;
+  tmuf_gbx_init(&g, src, &arena, tmuf_pack_classes, tmuf_pack_class_count);
+  g.feedback = feedback;
   const tmuf_control_style *st = tmuf_gbx_read_header(&g) ? tmuf_gbx_read_root(&g) : NULL;
-  const uint64_t size = pack->files[ref.file].uncompressed_size;
-  tmuf_pack_stream_close(&ps);
   int ok = 0;
   if (!st || g.error || g.pos != size)
     tmuf_set_error(err, err_size, "%s: %s after %llu of %llu bytes", path, g.error ? g.message : "parse ended",
@@ -349,6 +331,54 @@ int tmuf_control_style_load(const tmuf_packs *packs, const char *path, tmuf_cont
     ok = 1;
   }
   tmuf_arena_free(&arena);
+  return ok;
+}
+
+int tmuf_control_style_load(const tmuf_packs *packs, const char *path, tmuf_control_style_info *out, char *err,
+                            size_t err_size) {
+  if (out)
+    memset(out, 0, sizeof *out);
+  if (!packs || !path || !out) {
+    tmuf_set_error(err, err_size, "no packs, path or output");
+    return 0;
+  }
+  const tmuf_pack_ref ref = tmuf_packset_find(&packs->set, path);
+  if (ref.pack < 0) {
+    /* the game ships some styles loose under GameData (e.g.
+       MenuForever\Media\ControlStyle\TextTitle3.ControlStyle.Gbx), plain
+       and unencrypted */
+    char disk[1200];
+    if (!tmuf_packset_find_file(&packs->set, path, disk, sizeof disk)) {
+      tmuf_set_error(err, err_size, "%s: not in the packs or GameData", path);
+      return 0;
+    }
+    FILE *f = fopen(disk, "rb");
+    uint8_t *data = NULL;
+    long n = -1;
+    if (f && fseek(f, 0, SEEK_END) == 0 && (n = ftell(f)) > 0 && fseek(f, 0, SEEK_SET) == 0 &&
+        (data = malloc((size_t)n)) != NULL && fread(data, 1, (size_t)n, f) != (size_t)n)
+      n = -1;
+    if (f)
+      fclose(f);
+    int ok = 0;
+    if (!data || n <= 0)
+      tmuf_set_error(err, err_size, "%s: cannot read %s", path, disk);
+    else {
+      tmuf_mem_source ms;
+      tmuf_mem_source_init(&ms, data, (size_t)n);
+      ok = read_control_style(&ms.base, 0, (uint64_t)n, path, out, err, err_size);
+    }
+    free(data);
+    return ok;
+  }
+  const tmuf_pack *pack = &packs->set.packs[ref.pack];
+  tmuf_pack_stream ps;
+  if (!tmuf_pack_stream_open(&ps, pack, ref.file)) {
+    tmuf_set_error(err, err_size, "%s: cannot open", path);
+    return 0;
+  }
+  const int ok = read_control_style(&ps.base, 1, pack->files[ref.file].uncompressed_size, path, out, err, err_size);
+  tmuf_pack_stream_close(&ps);
   return ok;
 }
 
