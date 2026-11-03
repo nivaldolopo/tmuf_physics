@@ -5119,9 +5119,12 @@ static void read_layout(tmuf_gbx *g, const char *l, tmuf_control_style *st) {
     case 'T': {
       tmuf_gbx_u32(g);
       tmuf_gbx_u32(g);
-      read_layout(g, first_color ? "C" : "c", st);
+      const int first = first_color;
+      read_layout(g, first ? "C" : "c", st);
       first_color = 0;
-      tmuf_gbx_string(g);
+      const char *codes = tmuf_gbx_string(g);
+      if (st && first)
+        st->format = codes;
       break;
     }
     case 'O':

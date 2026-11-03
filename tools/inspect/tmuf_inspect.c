@@ -745,6 +745,13 @@ static int cmd_style(const char *packs_dir, const char *path) {
     fprintf(stderr, "%s\n", err);
     return 1;
   }
+  tmuf_control_style_info text;
+  if (tmuf_control_style_load(packs, path, &text, err, sizeof err))
+    printf("font %s, text size %g %g, colour %d (%g %g %g %g)\n", text.font[0] ? text.font : "(master's)",
+           text.text_size[0], text.text_size[1], text.has_color, text.color[0], text.color[1], text.color[2],
+           text.color[3]);
+  if (text.format[0])
+    printf("text codes %s\n", text.format);
   static tmuf_control_style_art art;
   const int ok = tmuf_control_style_art_load(packs, path, &art, err, sizeof err);
   tmuf_packs_close(packs);

@@ -153,6 +153,8 @@ typedef struct tmuf_control_style_info {
                           in the frame's units, then a second real */
   int has_color;
   float color[4];      /* the text colour, r g b a */
+  char format[16];     /* the $-codes its normal text starts with (e.g.
+                          "$o" bold, "$s" shadow), or "" */
 } tmuf_control_style_info;
 
 /* Reads a style file from the packs through the GBX parser, or, when the

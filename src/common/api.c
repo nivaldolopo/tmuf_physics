@@ -332,6 +332,7 @@ static int read_control_style(tmuf_source *src, int feedback, uint64_t size, con
     memcpy(out->text_size, st->text_size, sizeof out->text_size);
     out->has_color = st->has_color;
     memcpy(out->color, st->color, sizeof out->color);
+    snprintf(out->format, sizeof out->format, "%s", st->format ? st->format : "");
     ok = 1;
   }
   tmuf_arena_free(&arena);

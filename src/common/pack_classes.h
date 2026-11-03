@@ -805,6 +805,9 @@ typedef struct tmuf_control_style {
   int has_color;
   float color[4];      /* the text colour, r g b a */
   const char *name;    /* 0x0701700c: its id (+0x14) */
+  const char *format;  /* the first STextSettings_ColorAndChars' text: the
+                          $-codes put before the control's text (TextTitle3
+                          "$o", TextPlayerCardName "$s") */
   const char *icon;    /* 0x0701701e: the icon a quad of this style shows
                           when it names none (+0xc4, CControlQuad::Draw) */
 } tmuf_control_style;
