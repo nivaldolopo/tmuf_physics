@@ -157,7 +157,7 @@ static const char *node_file(const tmuf_gbx_node *n) {
 static void frame_add_child(tmuf_frame *f, const tmuf_control_child *ch, int parent, int depth);
 
 static void frame_add(tmuf_frame *f, const tmuf_gbx_node *n, int parent, const float *iso, const char *instance_name,
-                      int depth) {
+                      const char *instance_text, int depth) {
   if (!n || depth > 32)
     return;
   if (f->count == f->cap) {
@@ -195,7 +195,7 @@ static void frame_add(tmuf_frame *f, const tmuf_gbx_node *n, int parent, const f
   memcpy(out->box, c->box, sizeof out->box);
   memcpy(out->align, c->align, sizeof out->align);
   out->flags = c->flags;
-  out->text = c->text ? c->text : "";
+  out->text = instance_text ? instance_text : c->text ? c->text : "";
   out->image = node_file(c->image);
   out->substyle = c->quad_id ? c->quad_id : "";
   const tmuf_control_style *st = NULL;
@@ -227,7 +227,7 @@ static void frame_add(tmuf_frame *f, const tmuf_gbx_node *n, int parent, const f
    anchor's children under the control of that name below the child */
 static void frame_add_child(tmuf_frame *f, const tmuf_control_child *ch, int parent, int depth) {
   const size_t first = f->count;
-  frame_add(f, ch->control, parent, ch->iso, ch->name, depth);
+  frame_add(f, ch->control, parent, ch->iso, ch->name, ch->text, depth);
   for (uint32_t a = 0; a < ch->anchor_count; a++) {
     const tmuf_control *anchor = &ch->anchors[a];
     int at = -1;
@@ -283,7 +283,7 @@ static tmuf_frame *controls_load(const tmuf_packs *packs, const char *path, int 
     return NULL;
   }
   if (!menu) {
-    frame_add(f, &g.nodes[0], -1, NULL, NULL, 0);
+    frame_add(f, &g.nodes[0], -1, NULL, NULL, NULL, 0);
     return f;
   }
   const tmuf_game_menu *m = root;

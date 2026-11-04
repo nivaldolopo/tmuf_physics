@@ -817,6 +817,8 @@ typedef struct tmuf_control_style {
 typedef struct tmuf_control_child {
   tmuf_gbx_node *control;
   const char *name; /* an instanced model's own id (its own data) */
+  const char *text; /* an instanced card's own first text (its local data,
+                       CGameControlCardGeneric's StrInt1), or NULL */
   float iso[12];
   /* an instance's anchors: containers of the model (each a name and the
      children the instance puts in it) */
@@ -838,7 +840,9 @@ typedef struct tmuf_control {
   float box[6];             /* 00a/00b/00d/00e: GmBoxAligned (centre xyz, half size xyz) */
   float size[2];            /* 00a/00b */
   uint32_t align[2];        /* 00e: horizontal, vertical */
-  const char *text;         /* 00f, CControlLabel/CControlButton: text */
+  const char *text;         /* 00f, CControlLabel/CControlButton: text;
+                               CGameControlCardGeneric 001/003/004: its
+                               first text (StrInt1) */
   int has_own_style;        /* CControlLabel 0x07006000, CControlButton 0x07007000: */
   tmuf_control_style own_style; /* the style it forks (font, text size, colour) */
   uint32_t text_flags;      /* CControlText 0x07031000 / Label 003-006 */

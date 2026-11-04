@@ -2715,9 +2715,10 @@ static const tmuf_gbx_class ZONE = {0x0305c000, "CGameCtnZone", sizeof(tmuf_zone
 /* CSceneMobil::ArchiveOwnDataOld (reading), for a model instance. */
 /* own_chunk: reads one instance chunk of version 2's list (NULL: the
    chunk is taken as empty, as CSceneMobil's own) */
-typedef void (*mobil_own_chunk_fn)(tmuf_gbx *g, uint32_t class_id, uint32_t number);
+typedef void (*mobil_own_chunk_fn)(tmuf_gbx *g, uint32_t class_id, uint32_t number, void *ctx);
 
-static void mobil_own_data_with(tmuf_gbx *g, const char **name, tmuf_node_list *children, mobil_own_chunk_fn own_chunk) {
+static void mobil_own_data_with(tmuf_gbx *g, const char **name, tmuf_node_list *children, mobil_own_chunk_fn own_chunk,
+                                void *ctx) {
   uint32_t version = tmuf_gbx_u32(g);
   if (version == 0) {
     *name = id_text(g);
@@ -2732,7 +2733,7 @@ static void mobil_own_data_with(tmuf_gbx *g, const char **name, tmuf_node_list *
         break;
       uint32_t number = tmuf_gbx_u32(g);
       if (own_chunk)
-        own_chunk(g, cls, number);
+        own_chunk(g, cls, number, ctx);
     }
   } else if (version != 1) {
     return;
@@ -2742,7 +2743,7 @@ static void mobil_own_data_with(tmuf_gbx *g, const char **name, tmuf_node_list *
 }
 
 static void mobil_own_data_into(tmuf_gbx *g, const char **name, tmuf_node_list *children) {
-  mobil_own_data_with(g, name, children, NULL);
+  mobil_own_data_with(g, name, children, NULL, NULL);
 }
 
 static void mobil_own_data(tmuf_gbx *g, tmuf_object_link *l) {
@@ -3948,8 +3949,9 @@ static void control_children(tmuf_gbx *g, tmuf_control *c);
 /* An instanced control's own chunk (version 2 of its own data): the
    number n gives the class's chunk n - 1 (CGameControlCardGeneric
    0x030bd000 with 5: its 004, the local data), read as that class's
-   Chunk reads it */
-static void control_own_chunk(tmuf_gbx *g, uint32_t class_id, uint32_t number) {
+   Chunk reads it; a text it reads (a card's StrInt1) goes to the child
+   (ctx) */
+static void control_own_chunk(tmuf_gbx *g, uint32_t class_id, uint32_t number, void *ctx) {
   const uint32_t chunk = class_id + number - 1;
   for (size_t i = 0; i < tmuf_pack_class_count; i++) {
     const tmuf_gbx_class *cls = tmuf_pack_classes[i];
@@ -3964,6 +3966,8 @@ static void control_own_chunk(tmuf_gbx *g, uint32_t class_id, uint32_t number) {
       g->node_class = class_id;
       cls->chunks[j].read(g, &scratch, chunk);
       g->node_class = saved;
+      if (scratch.text)
+        ((tmuf_control_child *)ctx)->text = scratch.text;
       return;
     }
   }
@@ -3978,7 +3982,7 @@ static tmuf_gbx_node *control_instance(tmuf_gbx *g, tmuf_control_child *ch) {
     return tmuf_gbx_noderef(g);
   tmuf_node_list objects;
   memset(&objects, 0, sizeof objects);
-  mobil_own_data_with(g, &ch->name, &objects, control_own_chunk);
+  mobil_own_data_with(g, &ch->name, &objects, control_own_chunk, ch);
   if (!is_container(model))
     return model;
   uint32_t version = tmuf_gbx_u32(g);
@@ -4303,9 +4307,10 @@ static const tmuf_gbx_class GRID_CARD = {0x030ba000, "CGameControlGridCard", siz
 /* CGameControlCardGeneric::Chunk (0x646d40): 000 a number; 001, 003, 004
    ArchiveLocalData (0x646b90) with version 0, 1, 2: from 1 the version as
    a byte, a bool, then when set three strings, four texts (from version
-   2 seven), three numbers and three reals */
+   2 seven), three numbers and three reals; the first text (StrInt1, the
+   words its EntryStrInt1 shows, e.g. "Select Opponents") is kept */
 static void card_generic_chunk(tmuf_gbx *g, void *node, uint32_t id) {
-  UNUSED(node);
+  tmuf_control *c = node;
   if (id == 0x030bd000u) {
     tmuf_gbx_u32(g);
     return;
@@ -4314,8 +4319,11 @@ static void card_generic_chunk(tmuf_gbx *g, void *node, uint32_t id) {
   if (!tmuf_gbx_bool(g))
     return;
   int strings = 3 + 4 + (version > 1 ? 3 : 0);
-  for (int i = 0; i < strings && !g->error; i++)
-    tmuf_gbx_string(g);
+  for (int i = 0; i < strings && !g->error; i++) {
+    const char *s = tmuf_gbx_string(g);
+    if (i == 3 && s && s[0])
+      c->text = s;
+  }
   float f[3];
   tmuf_gbx_u32(g);
   tmuf_gbx_u32(g);

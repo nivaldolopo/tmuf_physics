@@ -112,7 +112,9 @@ typedef struct tmuf_frame_control {
                             the only one of the two that is ever 4 */
   uint32_t flags;        /* CControlBase's flags word */
   const char *text;      /* the text it shows (a label's, a button's, or the
-                            control's own), often a translation key */
+                            control's own; a CGameControlCardGeneric's
+                            first text, StrInt1, which its EntryStrInt1
+                            shows), often a translation key */
   const char *style;     /* its style: an external style file's name, or
                             the style sheet name */
   const char *font;      /* its font file's name, from its own style or
