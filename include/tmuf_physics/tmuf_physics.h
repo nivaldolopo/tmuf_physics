@@ -287,7 +287,9 @@ TMUF_API int tmuf_track_camera_water(const tmuf_track *track, tmuf_camera_water 
    The map's in-game clip group (CGameCtnChallenge chunk 0x03043021,
    CGameCtnMediaClipGroup): each clip with its trigger (the cells that start
    it, CGameRace::MediaClipCheckInGameTriggers) and its camera blocks. A map
-   whose clips cannot be read has none; its track loads as without them. */
+   whose clips cannot be read has none; its track loads as without them.
+   The same chunk's end race group comes in the same shape
+   (tmuf_track_endrace_clips). */
 
 enum { TMUF_CLIP_CAMERA_GAME = 0, TMUF_CLIP_CAMERA_CUSTOM = 1 };
 
@@ -336,6 +338,11 @@ typedef struct tmuf_ingame_clip {
 /* the map's in-game clips, in the group's order (clip i's trigger is the
    group's trigger i); 0 if none */
 TMUF_API uint32_t tmuf_track_ingame_clips(const tmuf_track *track, const tmuf_ingame_clip **clips);
+/* the map's end race clips (the same chunk's last clip group, CGameCtnChallenge
+   + 0x188), in the same shape: the clips the game's after-finish replay plays
+   when the car enters one of their cells
+   (CTrackManiaSwitcher::SwitchToEndRaceReplay, CGameCtnMediaClipViewer); 0 if none */
+TMUF_API uint32_t tmuf_track_endrace_clips(const tmuf_track *track, const tmuf_ingame_clip **clips);
 /* the size of a trigger cell: the collection's square size (x and z) and
    height (y); a position's cell is (trunc(x / xz), trunc(y / y), trunc(z / xz)) */
 TMUF_API void tmuf_track_trigger_cell_size(const tmuf_track *track, float *xz, float *y);

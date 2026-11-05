@@ -955,6 +955,13 @@ uint32_t tmuf_track_ingame_clips(const tmuf_track *track, const tmuf_ingame_clip
   return b ? b->map.ingame_clip_count : 0;
 }
 
+uint32_t tmuf_track_endrace_clips(const tmuf_track *track, const tmuf_ingame_clip **clips) {
+  const tmuf_track_base *b = track ? tmuf_track_base_of(track) : NULL;
+  if (clips)
+    *clips = b && b->map.endrace_clip_count ? b->map.endrace_clips : NULL;
+  return b ? b->map.endrace_clip_count : 0;
+}
+
 /* CGameCtnChallenge::GetCoordFromPos: the collection's SquareSize (x, z) and
    SquareHeight (y) */
 void tmuf_track_trigger_cell_size(const tmuf_track *track, float *xz, float *y) {

@@ -1,10 +1,11 @@
 /* tmuf_clips: a map's MediaTracker in-game clips (tmuf_track_ingame_clips):
    per clip its trigger cells, condition, keep-playing, end and camera blocks.
 
-   tmuf_clips [--visuals] PACKS FILE...
+   tmuf_clips [--visuals] [--endrace] PACKS FILE...
 
    FILE: a .Challenge.Gbx, or a .Replay.Gbx (its embedded map). --visuals
-   loads the tracks with TMUF_TRACK_VISUALS. Ends with the totals (maps,
+   loads the tracks with TMUF_TRACK_VISUALS. --endrace lists the end race
+   clips (tmuf_track_endrace_clips) instead. Ends with the totals (maps,
    clips, cells, camera blocks by id). */
 
 #include <stdio.h>
@@ -69,12 +70,17 @@ static void count_id(const char *id) {
 int main(int argc, char **argv) {
   int arg = 1;
   uint32_t flags = 0;
-  if (arg < argc && !strcmp(argv[arg], "--visuals")) {
-    flags |= TMUF_TRACK_VISUALS;
-    arg++;
+  int endrace = 0;
+  for (; arg < argc; arg++) {
+    if (!strcmp(argv[arg], "--visuals"))
+      flags |= TMUF_TRACK_VISUALS;
+    else if (!strcmp(argv[arg], "--endrace"))
+      endrace = 1;
+    else
+      break;
   }
   if (argc - arg < 2) {
-    fprintf(stderr, "usage: tmuf_clips [--visuals] PACKS FILE...\n");
+    fprintf(stderr, "usage: tmuf_clips [--visuals] [--endrace] PACKS FILE...\n");
     return 2;
   }
   char err[512];
@@ -120,7 +126,7 @@ int main(int argc, char **argv) {
     float xz, y;
     tmuf_track_trigger_cell_size(track, &xz, &y);
     const tmuf_ingame_clip *c;
-    const uint32_t count = tmuf_track_ingame_clips(track, &c);
+    const uint32_t count = endrace ? tmuf_track_endrace_clips(track, &c) : tmuf_track_ingame_clips(track, &c);
     printf("%s: %s, %u clips, cell %g x %g\n", argv[arg], tmuf_track_environment(track), count, xz, y);
     with_clips += count ? 1u : 0u;
     for (uint32_t i = 0; i < count; i++) {

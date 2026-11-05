@@ -177,6 +177,7 @@ typedef struct challenge_node {
   tmuf_challenge at_blocks;
   int has_blocks;
   const tmuf_gbx_node *ingame_group;
+  const tmuf_gbx_node *endrace_group;
 } challenge_node;
 
 static void c0304300d(tmuf_gbx *g, void *node, uint32_t id) {
@@ -267,7 +268,7 @@ static void c03043020(tmuf_gbx *g, void *node, uint32_t id) {
     tmuf_gbx_noderef(g);
   }
   n->ingame_group = tmuf_gbx_noderef(g);
-  tmuf_gbx_noderef(g);
+  n->endrace_group = tmuf_gbx_noderef(g);
   g->stop = 1;
 }
 
@@ -375,6 +376,11 @@ int tmuf_challenge_parse(const uint8_t *data, size_t size, tmuf_arena *arena, tm
   if (clips_ok && !tmuf_media_ingame_clips(n->ingame_group, arena, &out->ingame_clips, &out->ingame_clip_count)) {
     out->ingame_clips = NULL;
     out->ingame_clip_count = 0;
+  }
+  if (clips_ok &&
+      !tmuf_media_ingame_clips(n->endrace_group, arena, &out->endrace_clips, &out->endrace_clip_count)) {
+    out->endrace_clips = NULL;
+    out->endrace_clip_count = 0;
   }
   return 1;
 }

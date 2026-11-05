@@ -46,6 +46,9 @@ typedef struct tmuf_challenge {
   /* 0x03043021's in-game clip group (none if it cannot be read) */
   uint32_t ingame_clip_count;
   const struct tmuf_ingame_clip *ingame_clips;
+  /* 0x03043021's end race clip group (none if it cannot be read) */
+  uint32_t endrace_clip_count;
+  const struct tmuf_ingame_clip *endrace_clips;
 } tmuf_challenge;
 
 int tmuf_challenge_parse(const uint8_t *data, size_t size, tmuf_arena *arena, tmuf_challenge *out, char *err,
