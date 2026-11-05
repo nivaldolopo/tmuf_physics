@@ -876,6 +876,12 @@ typedef struct tmuf_light {
   float diffuse_rgb[3];      /* rgb * intensity * diffuse_intensity */
   float specular_rgb[3];     /* rgb * intensity * specular_intensity (GetSpecularRGB) */
   float flare_intensity;     /* +0x50: lens flare target = flare_intensity * intensity */
+  /* +0x38 ShadowIntensity and +0x3c ShadowRGB (the names of GxLight's
+     parameter table, chunk 0x04001009). A projector drawn as a shadow mask
+     (the cars' ProjShad: CVisionViewportDx9::Shadow_AddProjectorAsShadowMask)
+     keeps saturate(1 - shadow_intensity) of the light where it shades */
+  float shadow_intensity;
+  float shadow_rgb[3];
   float flare_size;          /* GxLightPoint +0x5c: the flare's half size (m) */
   float flare_bias_z;        /* +0x60: occlusion point moved this far toward the camera */
   /* GxLightBall radii: [0] diffuse, [1] specular, [2] (flag RADIUS2), [3]

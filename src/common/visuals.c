@@ -838,6 +838,8 @@ static int light_fill(builder *b, tmuf_asset *owner, tmuf_gbx_node *ref, const t
     out->specular_rgb[k] = g->specular * g->intensity * g->rgb[k];
   }
   out->flare_intensity = g->flare_intensity;
+  out->shadow_intensity = g->f38;
+  memcpy(out->shadow_rgb, g->shadow_rgb, sizeof out->shadow_rgb);
   out->flare_size = g->point[0];
   out->flare_bias_z = g->point[1];
   memcpy(out->radius, g->radius, sizeof out->radius);
