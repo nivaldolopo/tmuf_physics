@@ -5169,6 +5169,49 @@ static const tmuf_gbx_chunk CONTROL_STYLE_CHUNKS[] = {
 static const tmuf_gbx_class CONTROL_STYLE = {0x07017000, "CControlStyle", sizeof(tmuf_control_style),
                                              CONTROL_STYLE_CHUNKS, COUNT(CONTROL_STYLE_CHUNKS), NULL};
 
+/* ---- the race cameras: CGameControlCamera (0x0306B000), CGameControlCameraTarget
+   (0x03072000), CGameControlCameraTrackManiaRace2 (0x24086000) and Race3
+   (0x24087000). Read only to walk the nodes (their curves are inline CFuncKeysReal
+   nodes), so that tmuf_packs_read_parsed gives their bytes with the node feedback;
+   the sizes follow the classes' Chunk functions (Race2 @ 0x45db50; DoNat16 writes
+   4 bytes). ---- */
+
+SKIPN(skip60, 60)
+SKIPN(skip156, 156)
+
+/* Race2 0x24086000: 15 smooths (real, nat16, nat16), 2 reals, 6 nat16s, 2 reals,
+   3 curves, 4 reals */
+static void c24086000(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  UNUSED(id);
+  tmuf_gbx_skip(g, 15 * 12 + 2 * 4 + 6 * 4 + 2 * 4);
+  for (int i = 0; i < 3 && !g->error; i++)
+    tmuf_gbx_noderef(g);
+  tmuf_gbx_skip(g, 4 * 4);
+}
+
+/* Race3 0x24087000: 260 bytes of reals, nat16s and smooths, then 3 curves */
+static void c24087000(tmuf_gbx *g, void *node, uint32_t id) {
+  UNUSED(node);
+  UNUSED(id);
+  tmuf_gbx_skip(g, 260);
+  for (int i = 0; i < 3 && !g->error; i++)
+    tmuf_gbx_noderef(g);
+}
+
+static const tmuf_gbx_chunk CONTROL_CAMERA_CHUNKS[] = {READ(0x0306b00a, skip_id), READ(0x0306b00b, skip156)};
+static const tmuf_gbx_class CONTROL_CAMERA = {0x0306b000, "CGameControlCamera", 1, CONTROL_CAMERA_CHUNKS,
+                                              COUNT(CONTROL_CAMERA_CHUNKS), NULL};
+static const tmuf_gbx_chunk CAMERA_TARGET_CHUNKS[] = {READ(0x03072001, skip60), READ(0x03072002, skip4)};
+static const tmuf_gbx_class CAMERA_TARGET = {0x03072000, "CGameControlCameraTarget", 1, CAMERA_TARGET_CHUNKS,
+                                             COUNT(CAMERA_TARGET_CHUNKS), &CONTROL_CAMERA};
+static const tmuf_gbx_chunk CAMERA_RACE2_CHUNKS[] = {READ(0x24086000, c24086000), READ(0x24086001, skip4)};
+static const tmuf_gbx_class CAMERA_RACE2 = {0x24086000, "CGameControlCameraTrackManiaRace2", 1, CAMERA_RACE2_CHUNKS,
+                                            COUNT(CAMERA_RACE2_CHUNKS), &CAMERA_TARGET};
+static const tmuf_gbx_chunk CAMERA_RACE3_CHUNKS[] = {READ(0x24087000, c24087000), READ(0x24087001, skip4)};
+static const tmuf_gbx_class CAMERA_RACE3 = {0x24087000, "CGameControlCameraTrackManiaRace3", 1, CAMERA_RACE3_CHUNKS,
+                                            COUNT(CAMERA_RACE3_CHUNKS), &CAMERA_TARGET};
+
 const tmuf_gbx_class *const tmuf_pack_classes[] = {
     &SOLID,           &TREE,  &TREE_MIP,        &TREE_LIGHT, &VISUAL,          &SURFACE, &SURFACE_GEOM,
     &PLUG_LIGHT,      &BITMAP_RENDER_HEMI, &BITMAP_RENDER_LFM,
@@ -5190,5 +5233,6 @@ const tmuf_gbx_class *const tmuf_pack_classes[] = {
     &GAME_GRID, &GRID_CAMPAIGN, &GRID_GROUP,
     &GRID_CARD, &CONTROL_ENUM, &CARD_MANAGER, &CONTROL_SLIDER, &DATA_TYPE, &CONTROL_LIST, &UI_RANGE, &CARD_LADDER, &TM_CARD, &TM_MATCH_SETTINGS_CARD, &EFFECT_SIMI,
     &EMITTER_PARTICLES, &VISUAL_2D, &VISUAL_QUADS_2D, &COLOR_CHOOSER,
+    &CONTROL_CAMERA,  &CAMERA_TARGET, &CAMERA_RACE2, &CAMERA_RACE3,
 };
 const size_t tmuf_pack_class_count = COUNT(tmuf_pack_classes);
